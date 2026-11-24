@@ -1,8 +1,8 @@
 /*
- * Input checks for the solver: real calendar dates, inclusive ranges that do not
- * end before they start, and positive integer counts. Pure functions, no DOM.
+ * Date and range helpers shared by the store, selectors and solver.
+ * Pure functions, no DOM and no clock reads.
  *
- * Loaded as a classic script before solver.js. Node reads it through
+ * Loaded as a classic script before selectors.js. Node reads it through
  * module.exports; the browser reads it from globalThis.RentalValidation.
  */
 (function () {
@@ -22,47 +22,74 @@
     return isReal ? ms / DAY_MS : null;
   }
 
-  function badDate(label, field, value) {
-    return `${label} has an invalid ${field} date "${String(value)}": expected a real YYYY-MM-DD date.`;
+  function isoFromDay(day) {
+    if (!Number.isFinite(day)) return null;
+    return new Date(day * DAY_MS).toISOString().slice(0, 10);
   }
 
-  /** Problem with an inclusive range (real dates, end not before start), or null. */
+  function addDays(isoDate, amount) {
+    const day = toDay(isoDate);
+    if (day === null || !Number.isFinite(amount)) return null;
+    return isoFromDay(day + amount);
+  }
+
+  function daysBetween(start, end) {
+    const a = toDay(start);
+    const b = toDay(end);
+    if (a === null || b === null) return null;
+    return b - a;
+  }
+
+  /** Every real date from start to end inclusive, or [] for an invalid range. */
+  function eachDay(start, end) {
+    const a = toDay(start);
+    const b = toDay(end);
+    if (a === null || b === null || a > b) return [];
+    const days = [];
+    for (let day = a; day <= b; day += 1) days.push(isoFromDay(day));
+    return days;
+  }
+
   function rangeProblem(label, start, end) {
-    if (toDay(start) === null) return badDate(label, 'start', start);
-    if (toDay(end) === null) return badDate(label, 'end', end);
-    return toDay(start) > toDay(end) ? `${label} ends on ${end}, before it starts on ${start}.` : null;
-  }
-
-  /** Problem with a request's needs: at least one need, each with a positive integer count. */
-  function needsProblem(request) {
-    if (!Array.isArray(request.needs) || request.needs.length === 0) {
-      return `Request ${request.id} has no items requested.`;
+    if (toDay(start) === null) {
+      return `${label} has an invalid start date "${String(start)}": expected a real YYYY-MM-DD date.`;
     }
-    for (const need of request.needs) {
-      if (need.count === 0) return `Request ${request.id} asks for 0 x ${need.kind}: no items requested.`;
-      if (!Number.isInteger(need.count) || need.count < 1) {
-        return `Request ${request.id} asks for ${String(need.count)} x ${need.kind}: the count must be a positive integer.`;
-      }
+    if (toDay(end) === null) {
+      return `${label} has an invalid end date "${String(end)}": expected a real YYYY-MM-DD date.`;
+    }
+    if (toDay(start) > toDay(end)) {
+      return `${label} ends on ${end}, before it starts on ${start}.`;
     }
     return null;
   }
 
-  /**
-   * First problem with the dates, ranges or counts the solver reads, or null.
-   * Every booking, request and maintenance return date is checked, so no bad value reaches the solver.
-   */
-  function inputProblem(state) {
-    const problems = [
-      ...state.resources
-        .filter((res) => res.maintenanceUntil != null && toDay(res.maintenanceUntil) === null)
-        .map((res) => badDate(`Resource ${res.id}`, 'maintenanceUntil', res.maintenanceUntil)),
-      ...state.bookings.map((b) => rangeProblem(`Booking ${b.id}`, b.start, b.end)),
-      ...state.waitlist.map((r) => rangeProblem(`Request ${r.id}`, r.start, r.end) || needsProblem(r)),
-    ];
-    return problems.find(Boolean) ?? null;
+  function rangesOverlap(aStart, aEnd, bStart, bEnd) {
+    const a1 = toDay(aStart);
+    const a2 = toDay(aEnd);
+    const b1 = toDay(bStart);
+    const b2 = toDay(bEnd);
+    if ([a1, a2, b1, b2].some((day) => day === null)) return false;
+    return a1 <= b2 && b1 <= a2;
   }
 
-  const api = { toDay, inputProblem };
+  /**
+   * Validate a raw quantity field without coercing it. Used by the manual panel
+   * so "2.5", "-3", "0" and "" stay visible as typed and are reported as errors
+   * instead of becoming 1 or a truncated number.
+   */
+  function parseQuantityInput(raw) {
+    const text = typeof raw === 'string' ? raw.trim() : raw === undefined || raw === null ? '' : String(raw).trim();
+    if (!/^\d+$/.test(text)) {
+      return { ok: false, quantity: null, error: 'Enter a whole number of 1 or more.' };
+    }
+    const quantity = Number(text);
+    if (!Number.isSafeInteger(quantity) || quantity < 1) {
+      return { ok: false, quantity: null, error: 'Enter a whole number of 1 or more.' };
+    }
+    return { ok: true, quantity, error: null };
+  }
+
+  const api = { DAY_MS, toDay, isoFromDay, addDays, daysBetween, eachDay, rangeProblem, rangesOverlap, parseQuantityInput };
 
   if (typeof module !== 'undefined') {
     module.exports = api;

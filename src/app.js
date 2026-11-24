@@ -1,139 +1,175 @@
 /*
- * UI wiring for the fictional Atelier Lumière dispatch console.
+ * UI wiring for the Atelier Lumière back office.
  *
- * Everything is rendered with createElement() and textContent. There is no
- * HTML-string injection, no network call and no LLM. The assistant calls the pure
- * tools in tools.js, which call the deterministic solver in solver.js.
+ * All rendering uses createElement() and textContent. The page loads one seed
+ * file, builds one store, and every view renders from selectors. A single store
+ * subscription re-renders every view after a write and shows the toast for the
+ * operations event that write appended.
  */
 (function () {
   'use strict';
 
-  const { house, resources, bookings, waitlist, overflowWaitlist, clauses, scenarios } = globalThis.RentalData;
-  const solver = globalThis.RentalSolver;
-  const approval = globalThis.RentalApproval;
-  const summaryApi = globalThis.RentalSummary;
-  const toolsApi = globalThis.RentalTools;
+  const selectors = globalThis.RentalSelectors;
+  const storeApi = globalThis.RentalStore;
+  const proposalsApi = globalThis.RentalProposals;
+  const toolsApi = globalThis.RentalAssistantTools;
   const assistantApi = globalThis.RentalAssistant;
-  const { toDay } = globalThis.RentalValidation;
+  const { toDay, rangeProblem, parseQuantityInput } = globalThis.RentalValidation;
 
-  const PLACEHOLDER = 'Results appear here after you solve. Nothing is applied until you approve a plan.';
-  const STALE = 'The cancellation or kit changed. Solve again to see a current re-plan.';
-  const VERDICTS = {
-    full: 'Full re-plan',
-    partial: 'Partial re-plan: client consent needed',
-    none: 'No feasible re-plan',
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const MONTHS_SHORT = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  const WEEKDAYS_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const WEEKDAYS_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const TAB_NAMES = ['home', 'calendar', 'equipment', 'reservations', 'operations', 'assistant'];
+  const STATUS_BADGES = {
+    confirmed: { label: 'Confirmed', variant: 'confirmed' },
+    held: { label: 'Held', variant: 'held' },
+    returned: { label: 'Returned', variant: 'returned' },
+    cancelled: { label: 'Cancelled', variant: 'cancelled' },
   };
-  const MONTHS = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December',
-  ];
-  const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  const TAB_NAMES = ['dispatch', 'calendar', 'equipment', 'reservations', 'assistant'];
-  const DAY_MS = 24 * 60 * 60 * 1000;
+  const FEASIBILITY_BADGES = {
+    feasible: { label: 'Feasible', variant: 'feasible' },
+    partial: { label: 'Partial', variant: 'partial' },
+    none: { label: 'No plan', variant: 'none' },
+  };
+  const PROPOSAL_STATUS = {
+    pending: { label: 'Pending', variant: 'pending' },
+    approved: { label: 'Approved', variant: 'approved' },
+    rejected: { label: 'Rejected', variant: 'rejected' },
+    human: { label: 'Human dispatcher', variant: 'human' },
+  };
 
   const $ = (id) => document.getElementById(id);
 
   const els = {
-    // shell
-    main: $('main'),
-    sidebar: $('sidebar'),
+    bootState: $('boot-state'),
+    bootError: $('boot-error'),
     menuToggle: $('menu-toggle'),
     navBackdrop: $('nav-backdrop'),
     navTabs: [...document.querySelectorAll('.nav-tab')],
-    // dispatch
-    scenarios: $('scenarios'),
-    detail: $('scenario-detail'),
-    summary: $('scenario-summary'),
-    question: $('question'),
-    waitlistLine: $('waitlist-line'),
-    kitPlaceholder: $('kit-placeholder'),
-    kitPanel: $('kit-panel'),
-    kitCount: $('kit-count'),
-    kit: $('kit-options'),
-    kitNote: $('kit-note'),
-    solve: $('solve'),
-    solveHint: $('solve-hint'),
-    results: $('results'),
-    resultsEmpty: $('results-empty'),
-    resultsError: $('results-error'),
-    resultsBody: $('results-body'),
-    verdict: $('verdict'),
-    timing: $('timing'),
-    outcome: $('outcome'),
-    humanNote: $('human-note'),
-    plansBlock: $('plans-block'),
-    planRows: $('plan-rows'),
-    planDetails: $('plan-details'),
-    reject: $('reject-all'),
-    noPlanBlock: $('no-plan-block'),
-    noPlan: $('no-plan'),
-    handoffs: $('handoffs'),
-    decisionBlock: $('decision-block'),
-    decision: $('decision'),
-    inventory: $('inventory'),
-    draft: $('draft'),
-    statOpen: $('stat-open'),
-    statCapacity: $('stat-capacity'),
-    statReplans: $('stat-replans'),
-    // calendar
+    navOperationsCount: $('nav-operations-count'),
+    topbarDate: $('topbar-date'),
+    newReservation: $('new-reservation'),
+    toast: $('toast'),
+    toastText: $('toast-text'),
+    toastLink: $('toast-link'),
+    toastClose: $('toast-close'),
+    homeDate: $('home-date'),
+    homeTitle: $('home-title'),
+    homeDayNumber: $('home-day-number'),
+    homeDayMonth: $('home-day-month'),
+    kpiPickups: $('kpi-pickups'),
+    kpiReturns: $('kpi-returns'),
+    kpiOut: $('kpi-out'),
+    kpiConflicts: $('kpi-conflicts'),
+    attentionCount: $('attention-count'),
+    attentionState: $('attention-state'),
+    attentionList: $('attention-list'),
+    activityState: $('activity-state'),
+    activityFeed: $('activity-feed'),
+    toolGrid: $('tool-grid'),
     calPrev: $('cal-prev'),
     calNext: $('cal-next'),
+    calToday: $('cal-today'),
     calMonth: $('cal-month'),
     calendarState: $('calendar-state'),
     calendarGrid: $('calendar-grid'),
     calendarMonthNote: $('calendar-month-note'),
     dayTitle: $('day-title'),
+    dayCount: $('day-count'),
     dayState: $('day-state'),
     dayList: $('day-list'),
-    // equipment
+    equipmentSearch: $('equipment-search'),
     equipmentFilter: $('equipment-filter'),
+    equipmentStatus: $('equipment-status'),
     equipmentCount: $('equipment-count'),
     equipmentState: $('equipment-state'),
     equipmentTableWrap: $('equipment-table-wrap'),
     equipmentRows: $('equipment-rows'),
-    // reservations
     reservationSearch: $('reservation-search'),
     reservationFilter: $('reservation-filter'),
     reservationCount: $('reservation-count'),
     reservationsState: $('reservations-state'),
     reservationsTableWrap: $('reservations-table-wrap'),
     reservationRows: $('reservation-rows'),
-    // assistant
+    reservationDetail: $('reservation-detail'),
+    reservationDetailTitle: $('reservation-detail-title'),
+    reservationDetailBody: $('reservation-detail-body'),
+    reservationDetailClose: $('reservation-detail-close'),
+    proposalFilter: $('proposal-filter'),
+    proposalCount: $('proposal-count'),
+    proposalState: $('proposal-state'),
+    proposalList: $('proposal-list'),
     chatLog: $('chat-log'),
     chatStatus: $('chat-status'),
+    chatChips: $('chat-chips'),
     chatForm: $('chat-form'),
     chatInput: $('chat-input'),
     chatSend: $('chat-send'),
-    // scope
-    scopeCard: $('scope-card'),
-    scopeLink: $('scope-link'),
-    scopeClose: $('scope-close'),
-    scopeTitle: $('scope-title'),
+    panelBackdrop: $('panel-backdrop'),
+    panel: $('reservation-panel'),
+    panelClose: $('panel-close'),
+    panelCancel: $('panel-cancel'),
+    panelForm: $('reservation-form'),
+    panelCustomerSearch: $('panel-customer-search'),
+    panelCustomerResults: $('panel-customer-results'),
+    panelCustomerSelected: $('panel-customer-selected'),
+    panelStart: $('panel-start'),
+    panelEnd: $('panel-end'),
+    panelItemSearch: $('panel-item-search'),
+    panelItemResults: $('panel-item-results'),
+    panelItems: $('panel-items'),
+    panelAvailability: $('panel-availability'),
+    panelAlternatives: $('panel-alternatives'),
+    panelError: $('panel-error'),
+    panelSubmit: $('panel-submit'),
   };
 
-  // Live state for this page session. Approvals replace it; the assistant only reads it.
-  let live = {
-    resources,
-    bookings,
-    clauses,
-    waitlist: [...waitlist, ...overflowWaitlist],
-  };
-  let selectedId = null;
-  let session = null;
-  let busy = false;
-  let replansRun = 0;
-  let activeTab = 'dispatch';
+  let store = null;
+  let tools = null;
+  let assistant = null;
+  let anchorDate = '2026-11-24';
+  let calendar = { year: 2026, month: 10, selected: null, ready: false };
+  let equipmentSort = { key: 'name', dir: 'asc' };
+  let reservationSort = { key: 'start', dir: 'asc' };
+  let selectedReservationId = null;
   let assistantBusy = false;
-  let calendar = { year: 2026, month: 11, selected: null, ready: false };
-  const loaded = { calendar: false, equipment: false, reservations: false };
+  let toastTimer = null;
+  let lastFocus = null;
+  const panel = {
+    customerId: null,
+    customerName: null,
+    items: [],
+  };
 
-  // --- small DOM helpers ---------------------------------------------------
+  // --- DOM helpers ---------------------------------------------------------
 
   function el(tag, text, className) {
     const node = document.createElement(tag);
-    if (text !== undefined) node.textContent = text;
+    if (text !== undefined && text !== null) node.textContent = String(text);
     if (className) node.className = className;
     return node;
+  }
+
+  function svgIcon(paths, size = 20) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    svg.setAttribute('focusable', 'false');
+    svg.setAttribute('aria-hidden', 'true');
+    for (const pathData of paths) {
+      const path = document.createElementNS(ns, 'path');
+      path.setAttribute('d', pathData);
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', 'currentColor');
+      path.setAttribute('stroke-width', '1.7');
+      path.setAttribute('stroke-linecap', 'round');
+      path.setAttribute('stroke-linejoin', 'round');
+      svg.append(path);
+    }
+    return svg;
   }
 
   function cell(label, ...content) {
@@ -143,16 +179,13 @@
     return td;
   }
 
-  function listBlock(title, items, className = 'block') {
-    const wrap = el('div', undefined, className);
-    const list = el('ul');
-    for (const item of items) list.append(el('li', item));
-    wrap.append(el('h4', title), list);
-    return wrap;
-  }
-
   function badge(label, variant) {
     return el('span', label, `badge badge-${variant}`);
+  }
+
+  function statusBadge(status) {
+    const spec = STATUS_BADGES[status] || { label: status, variant: 'returned' };
+    return badge(spec.label, spec.variant);
   }
 
   function setState(node, message, kind = 'empty') {
@@ -160,41 +193,104 @@
       node.hidden = true;
       node.textContent = '';
       node.className = 'state';
-      node.removeAttribute('role');
       return;
     }
     node.hidden = false;
     node.textContent = message;
     node.className = `state state-${kind}`;
-    node.setAttribute('role', kind === 'error' ? 'alert' : 'status');
   }
 
-  function isoToDay(iso) {
-    return typeof iso === 'string' ? toDay(iso) : null;
+  function button(text, className, onClick) {
+    const node = el('button', text, className);
+    node.type = 'button';
+    node.addEventListener('click', onClick);
+    return node;
   }
 
-  function dayToParts(dayNumber) {
-    const date = new Date(dayNumber * DAY_MS);
-    return {
-      year: date.getUTCFullYear(),
-      month: date.getUTCMonth(),
-      day: date.getUTCDate(),
-      iso: date.toISOString().slice(0, 10),
-    };
+  function parseIso(iso) {
+    const day = toDay(iso);
+    if (day === null) return null;
+    const date = new Date(day * 86400000);
+    return { year: date.getUTCFullYear(), month: date.getUTCMonth(), date: date.getUTCDate(), weekday: date.getUTCDay() };
   }
 
   function prettyDate(iso) {
-    const day = isoToDay(iso);
-    if (day === null) return iso;
-    const { year, month, day: date } = dayToParts(day);
-    return `${date} ${MONTHS[month]} ${year}`;
+    const parts = parseIso(iso);
+    if (!parts) return iso;
+    return `${WEEKDAYS_LONG[parts.weekday]} ${parts.date} ${MONTHS[parts.month]} ${parts.year}`;
   }
 
-  function activeBookings() {
-    return live.bookings.filter((booking) => booking.status !== 'cancelled');
+  function shortDate(iso) {
+    const parts = parseIso(iso);
+    return parts ? `${parts.date} ${MONTHS[parts.month].slice(0, 3)} ${parts.year}` : iso;
   }
 
-  // --- shell: tabs, menu, focus -------------------------------------------
+  function isoFromParts(year, month, date) {
+    return new Date(Date.UTC(year, month, date)).toISOString().slice(0, 10);
+  }
+
+  function eventTime(at) {
+    if (!at) return '';
+    const iso = String(at);
+    if (iso.includes('T')) return `${iso.slice(8, 10)} ${MONTHS_SHORT[Number(iso.slice(5, 7)) - 1]} · ${iso.slice(11, 16)}`;
+    return shortDate(iso);
+  }
+
+  // --- boot ----------------------------------------------------------------
+
+  async function boot() {
+    try {
+      const response = await fetch('data/seed.json', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const seed = await response.json();
+      start(seed);
+    } catch (error) {
+      els.bootState.hidden = true;
+      els.bootError.hidden = false;
+      els.bootError.textContent = `The studio data could not be loaded (${error instanceof Error ? error.message : String(error)}). Serve this folder from a static HTTP server and reload; opening index.html directly from file:// blocks the seed file request.`;
+      els.newReservation.disabled = true;
+    }
+  }
+
+  function start(seed) {
+    anchorDate = seed.meta?.anchorDate || '2026-11-24';
+    store = storeApi.createStore(seed);
+    tools = toolsApi.createAssistantTools({ store });
+    assistant = assistantApi.createAssistant({ getTools: () => tools });
+
+    const anchor = parseIso(anchorDate);
+    calendar = { year: anchor.year, month: anchor.month, selected: anchorDate, ready: true };
+
+    populateCategoryFilter(seed);
+    els.topbarDate.textContent = prettyDate(anchorDate);
+    els.homeDate.textContent = prettyDate(anchorDate);
+    els.homeDayNumber.textContent = String(anchor.date);
+    els.homeDayMonth.textContent = MONTHS_SHORT[anchor.month];
+
+    store.subscribe(onStoreChange);
+    bindEvents();
+    setupChatChips();
+    renderAll();
+    appendOpeningMessage();
+    els.bootState.hidden = true;
+
+    const initial = window.location.hash.replace('#', '');
+    showTab(TAB_NAMES.includes(initial) ? initial : 'home', { focus: false, updateHash: false });
+  }
+
+  function onStoreChange(state) {
+    renderAll(state);
+    renderAssistantChips();
+    if (openCheck()) updatePanelAvailability();
+    const latest = state.events[state.events.length - 1];
+    if (latest) toastForEvent(latest);
+  }
+
+  function openCheck() {
+    return !els.panel.hidden;
+  }
+
+  // --- shell ---------------------------------------------------------------
 
   function closeMenu() {
     document.body.classList.remove('nav-open');
@@ -213,30 +309,33 @@
 
   function showTab(name, options = {}) {
     const { focus = true, updateHash = true } = options;
-    const tab = TAB_NAMES.includes(name) ? name : 'dispatch';
-    activeTab = tab;
-    for (const button of els.navTabs) {
-      if (button.dataset.tab === tab) button.setAttribute('aria-current', 'page');
-      else button.removeAttribute('aria-current');
+    const tab = TAB_NAMES.includes(name) ? name : 'home';
+    for (const tabButton of els.navTabs) {
+      if (tabButton.dataset.tab === tab) tabButton.setAttribute('aria-current', 'page');
+      else tabButton.removeAttribute('aria-current');
     }
     for (const candidate of TAB_NAMES) {
       const view = $(`view-${candidate}`);
       if (view) view.hidden = candidate !== tab;
     }
-    if (tab === 'dispatch') renderSummary();
-    if (tab === 'calendar') loadCalendar();
-    if (tab === 'equipment') loadEquipment();
-    if (tab === 'reservations') loadReservations();
+    if (tab === 'calendar') renderCalendar();
+    if (tab === 'equipment') renderEquipment();
+    if (tab === 'reservations') renderReservations();
+    if (tab === 'operations') renderOperations();
+    if (tab === 'assistant') {
+      renderAssistantChips();
+      setTimeout(() => els.chatInput.focus(), 0);
+    }
     closeMenu();
     if (updateHash) {
       try {
         history.replaceState(null, '', `#${tab}`);
       } catch (error) {
-        // file:// in some browsers refuses history changes; the tabs still work.
+        // Some file:// contexts refuse history changes; navigation still works.
       }
     }
     if (focus) {
-      const heading = $(`${tab}-title`);
+      const heading = $(`${tab === 'home' ? 'home' : tab}-title`);
       if (heading) heading.focus();
     }
   }
@@ -255,710 +354,297 @@
     }
   }
 
-  // --- Dispatch summary ----------------------------------------------------
-
-  function renderSummary() {
-    const stats = summaryApi.summaryStats(live, replansRun);
-    els.statOpen.textContent = String(stats.openReservations);
-    els.statCapacity.textContent = String(stats.equipmentAtCapacity);
-    els.statReplans.textContent = String(stats.replansRun);
+  function renderNav(state, proposals = proposalsApi.buildProposals(state)) {
+    const open = selectors.proposalCounts(state, proposals).open;
+    els.navOperationsCount.hidden = open === 0;
+    els.navOperationsCount.textContent = String(open);
   }
 
-  function renderDataViews() {
-    renderSummary();
-    if (loaded.equipment) renderEquipment();
-    if (loaded.reservations) renderReservations();
-    if (loaded.calendar) renderCalendar();
-  }
+  // --- home ----------------------------------------------------------------
 
-  // --- Dispatch: scenarios, kit, solve ------------------------------------
+  function renderHome(state, proposalRows = null) {
+    const today = anchorDate;
+    const stats = selectors.kpis(state, today);
+    els.kpiPickups.textContent = String(stats.pickupsToday);
+    els.kpiReturns.textContent = String(stats.returnsToday);
+    els.kpiOut.textContent = String(stats.equipmentOutToday);
+    els.kpiConflicts.textContent = String(stats.openConflicts);
+    els.homeTitle.textContent = 'Good morning, Léa';
 
-  function bookingFor(scenario) {
-    return live.bookings.find((booking) => booking.id === scenario.cancellation.bookingId) || null;
-  }
-
-  function selectedScenario() {
-    return scenarios.find((scenario) => scenario.id === selectedId) || null;
-  }
-
-  function stateFor(scenario) {
-    return {
-      ...live,
-      waitlist: live.waitlist.filter((request) => scenario.waitlistIds.includes(request.id)),
-    };
-  }
-
-  function kitInputs() {
-    return [...els.kit.querySelectorAll('input')];
-  }
-
-  function releasedIds() {
-    return kitInputs().filter((input) => input.checked).map((input) => input.value);
-  }
-
-  function cancellationFor(scenario) {
-    return {
-      bookingId: scenario.cancellation.bookingId,
-      question: scenario.cancellation.question,
-      releasedIds: releasedIds(),
-    };
-  }
-
-  function waitlistLine(scenario) {
-    const requests = stateFor(scenario).waitlist;
-    if (requests.length === 0) return 'Waitlist: nobody is waiting for dates that overlap this cancellation.';
-    const list = requests.map((request) => `${request.id} ${request.client}, ${request.start} to ${request.end}`).join('; ');
-    return `Waitlist: ${list}.`;
-  }
-
-  function scenarioCard(scenario) {
-    const booking = bookingFor(scenario);
-    const button = el('button', undefined, 'scenario');
-    button.type = 'button';
-    button.dataset.id = scenario.id;
-    button.setAttribute('aria-pressed', 'false');
-    button.append(el('span', scenario.title, 'scenario-title'));
-    if (booking) {
-      button.append(
-        el('span', `${booking.start} to ${booking.end}`, 'scenario-date'),
-        el('span', `Customer: ${booking.client}`, 'scenario-meta'),
-        el('span', `Items: ${booking.assigned.join(', ')}`, 'scenario-meta mono'),
-        el('span', `Releases: all ${booking.assigned.length} items by default`, 'scenario-meta'),
-      );
-    } else {
-      button.append(el('span', 'This reservation is no longer in local data.', 'scenario-meta'));
-    }
-    button.append(el('span', 'Select', 'scenario-state'));
-    button.addEventListener('click', () => selectScenario(scenario.id));
-    const item = el('li');
-    item.append(button);
-    return item;
-  }
-
-  function selectScenario(id) {
-    selectedId = id;
-    for (const button of els.scenarios.querySelectorAll('button')) {
-      const pressed = button.dataset.id === id;
-      button.setAttribute('aria-pressed', String(pressed));
-      const state = button.querySelector('.scenario-state');
-      if (state) state.textContent = pressed ? 'Selected' : 'Select';
-    }
-    renderScenario();
-  }
-
-  function kitRow(resourceId) {
-    const res = live.resources.find((candidate) => candidate.id === resourceId);
-    const item = el('li');
-    const label = el('label', undefined, 'kit-row');
-    const input = el('input');
-    input.type = 'checkbox';
-    input.value = resourceId;
-    input.checked = true;
-    const name = el('span', undefined, 'kit-name');
-    name.append(
-      el('span', resourceId, 'mono kit-id'),
-      el('span', res ? res.label : 'Unknown item', 'kit-label'),
-    );
-    label.append(input, name, el('span', 'Released', 'kit-state'));
-    item.append(label);
-    return item;
-  }
-
-  function updateKitState() {
-    const inputs = kitInputs();
-    const released = inputs.filter((input) => input.checked).length;
-    for (const input of inputs) {
-      const row = input.closest('.kit-row');
-      if (row) row.querySelector('.kit-state').textContent = input.checked ? 'Released' : 'Held back';
-    }
-    els.kitCount.textContent = `${released} of ${inputs.length} units available`;
-    if (released === 0) {
-      els.kitNote.textContent = 'No kit is released. Solving will report that every item is held.';
-    } else if (released < inputs.length) {
-      els.kitNote.textContent = `${inputs.length - released} held back: staff keep them and they are not offered to the waitlist.`;
-    } else {
-      els.kitNote.textContent = 'All kit is released and can be offered to the waitlist.';
-    }
-  }
-
-  function renderSolveState() {
-    const scenario = selectedScenario();
-    els.solve.disabled = busy || !scenario;
-    els.solve.textContent = busy ? 'Solving...' : 'Solve re-plan';
-    els.solve.setAttribute('aria-busy', String(busy));
-    if (busy) {
-      els.solveHint.textContent = 'Solver running in this page.';
-    } else if (scenario) {
-      els.solveHint.textContent = 'Uses the kit ticked in step 2.';
-    } else {
-      els.solveHint.textContent = 'Pick a cancellation in step 1 first.';
-    }
-  }
-
-  function hideResults(message = PLACEHOLDER) {
-    session = null;
-    setState(els.resultsError, '');
-    els.timing.hidden = true;
-    els.timing.textContent = '';
-    els.resultsEmpty.textContent = message;
-    els.resultsEmpty.hidden = false;
-    els.resultsBody.hidden = true;
-  }
-
-  function showResultsError(message) {
-    session = null;
-    els.resultsEmpty.hidden = true;
-    els.resultsBody.hidden = true;
-    els.timing.hidden = true;
-    setState(els.resultsError, message, 'error');
-  }
-
-  function renderScenario() {
-    const scenario = selectedScenario();
-    if (!scenario) {
-      els.detail.hidden = true;
-      els.kitPanel.hidden = true;
-      els.kitPlaceholder.hidden = false;
-      renderSolveState();
-      hideResults();
-      return;
-    }
-    const booking = bookingFor(scenario);
-    if (!booking) {
-      els.detail.hidden = true;
-      els.kitPanel.hidden = true;
-      els.kitPlaceholder.hidden = false;
-      renderSolveState();
-      showResultsError(`Reservation ${scenario.cancellation.bookingId} is no longer in local data. Pick another cancellation.`);
-      return;
-    }
-    const question = scenario.cancellation.question;
-    els.summary.textContent = `${scenario.summary} Cancelled booking: ${booking.id}, ${booking.client}, ${booking.start} to ${booking.end}.`;
-    els.question.textContent = question
-      ? `Client question on this cancellation: "${question}"`
-      : 'No client question on this cancellation.';
-    els.waitlistLine.textContent = waitlistLine(scenario);
-    els.detail.hidden = false;
-    els.kit.replaceChildren(...booking.assigned.map(kitRow));
-    els.kitPlaceholder.hidden = true;
-    els.kitPanel.hidden = false;
-    updateKitState();
-    renderSolveState();
-    hideResults();
-  }
-
-  function onKitChange() {
-    updateKitState();
-    if (session) hideResults(STALE);
-  }
-
-  function onSolve() {
-    const scenario = selectedScenario();
-    if (!scenario || busy) return;
-    busy = true;
-    renderSolveState();
-    els.results.setAttribute('aria-busy', 'true');
-    setState(els.resultsError, '');
-    els.resultsEmpty.textContent = 'Running the deterministic solver in this page...';
-    els.resultsEmpty.hidden = false;
-    els.resultsBody.hidden = true;
-    // Yield once so the loading state is painted before the synchronous solve runs.
-    setTimeout(() => runSolve(scenario), 0);
-  }
-
-  function runSolve(scenario) {
-    let solution;
-    let elapsed;
+    let attention = [];
     try {
-      const started = performance.now();
-      solution = solver.solve(stateFor(scenario), cancellationFor(scenario));
-      elapsed = performance.now() - started;
-      replansRun += 1;
+      attention = selectors.needsAttention(state, today, proposalRows);
     } catch (error) {
-      session = null;
-      showResultsError(`The solve failed: ${error instanceof Error ? error.message : String(error)}. Nothing was applied.`);
-      return;
-    } finally {
-      busy = false;
-      els.results.setAttribute('aria-busy', 'false');
-      renderSolveState();
+      setState(els.attentionState, `Attention list could not be read: ${error.message}`, 'error');
     }
-    session = { decided: false };
-    renderSolution(solution, elapsed);
-    renderSummary();
-  }
-
-  function renderSolution(solution, elapsedMs) {
-    setState(els.resultsError, '');
-    els.resultsEmpty.hidden = true;
-    els.resultsBody.hidden = false;
-    els.decisionBlock.hidden = true;
-    els.timing.hidden = false;
-    els.verdict.textContent = VERDICTS[solution.outcome];
-    els.timing.textContent = `Solved in ${elapsedMs.toFixed(2)} ms`;
-    els.outcome.textContent = solution.reason;
-    els.humanNote.hidden = solution.outcome !== 'none';
-
-    els.plansBlock.hidden = solution.plans.length === 0;
-    els.planRows.replaceChildren(...solution.plans.map(planRow));
-    els.planDetails.replaceChildren(...solution.plans.map(planDetail));
-    els.reject.disabled = solution.plans.length === 0;
-
-    renderNoPlan(solution.rejected);
-    renderHandoffs(solution.handoffs, solution.outcome);
-  }
-
-  function planRow(plan) {
-    const row = el('tr');
-    const approve = el('button', `Approve ${plan.id}`, 'btn btn-secondary approve');
-    approve.type = 'button';
-    approve.addEventListener('click', () => approvePlan(plan));
-
-    const moves = el('ul', undefined, 'moves');
-    for (const action of plan.actions) {
-      const item = el('li');
-      item.append(
-        el('span', action.resourceId, 'mono'),
-        document.createTextNode(` ${action.label}, from ${action.source}`),
-      );
-      moves.append(item);
+    els.attentionCount.textContent = String(attention.length);
+    els.attentionList.replaceChildren();
+    if (attention.length === 0) {
+      setState(els.attentionState, 'Nothing needs attention. Conflicts, proposals and expiring holds appear here.', 'empty');
+    } else {
+      setState(els.attentionState, '');
+      for (const row of attention) {
+        const item = el('li', undefined, `attention-item ${row.type === 'proposal' ? 'is-proposal' : row.type === 'hold' ? 'is-hold' : row.type === 'pickup' ? 'is-pickup' : ''}`);
+        const icon = el('span', row.type === 'conflict' ? '!' : row.type === 'proposal' ? '→' : row.type === 'hold' ? 'H' : 'P', 'attention-icon');
+        icon.setAttribute('aria-hidden', 'true');
+        const body = el('div', undefined, 'attention-body');
+        body.append(el('p', row.title, 'attention-title'), el('p', row.detail, 'attention-detail'));
+        const link = button('Open', 'attention-link', () => {
+          if (row.type === 'conflict' || row.type === 'proposal') {
+            showTab('operations', { focus: false });
+            if (row.proposalId) highlightProposal(row.proposalId);
+          } else {
+            openReservation(row.reservationId);
+          }
+        });
+        link.setAttribute('aria-label', `Open ${row.title}`);
+        item.append(icon, body, link);
+        els.attentionList.append(item);
+      }
     }
 
-    const status = el('span', undefined, 'status-cell');
-    status.append(
-      badge(plan.status === 'full' ? 'Full' : 'Partial', plan.status === 'full' ? 'booked' : 'warn'),
-      document.createTextNode(`${plan.filled} of ${plan.required} items`),
-    );
-
-    row.append(
-      cell('Plan', el('span', plan.id, 'mono')),
-      cell('To', document.createTextNode(plan.client)),
-      cell('From booking', el('span', plan.cancelledBookingId, 'mono')),
-      cell('What moved', moves),
-      cell('Status', status),
-      cell('Decision', approve),
-    );
-    return row;
-  }
-
-  function planDetail(plan) {
-    const wrap = el('article', undefined, 'plan-detail');
-    if (plan.status === 'partial') {
-      wrap.append(listBlock(`Missing from ${plan.id}: ${plan.filled} of ${plan.required} items offered`, plan.missing, 'callout'));
+    const feed = selectors.activityFeed(state, 10);
+    els.activityFeed.replaceChildren();
+    if (feed.length === 0) {
+      setState(els.activityState, 'No changes yet in this session.', 'empty');
+    } else {
+      setState(els.activityState, '');
+      for (const event of feed) {
+        const item = el('li', undefined, 'activity-item');
+        item.append(el('span', undefined, 'activity-mark'));
+        const body = el('div');
+        body.append(el('p', event.summary, 'activity-text'), el('p', eventTime(event.at), 'activity-time'));
+        item.append(body);
+        els.activityFeed.append(item);
+      }
     }
-    const details = el('details');
-    details.append(
-      el('summary', `Checks, changes and open items for ${plan.id}`),
-      listBlock('Constraints checked', plan.checks),
-      listBlock('What changes', plan.changes.map((change) => `${change.client}: ${change.text}`)),
-      listBlock('Left open', plan.open.length ? plan.open : ['Nothing']),
-    );
-    wrap.append(details);
-    return wrap;
+
+    renderToolGrid(state, proposalRows);
   }
 
-  function renderNoPlan(rejected) {
-    els.noPlanBlock.hidden = rejected.length === 0;
-    els.noPlan.replaceChildren(...rejected.map((item) => el('li', `${item.requestId} (${item.client}): ${item.reason}`)));
-  }
-
-  function renderHandoffs(handoffs, outcome) {
-    els.handoffs.replaceChildren();
-    if (handoffs.length === 0) {
-      els.handoffs.append(el('li', outcome === 'none'
-        ? 'No feasible plan: the cancellation goes to a human dispatcher.'
-        : 'No hand-off needed: the client has no question on this cancellation.'));
+  function renderToolGrid(state, proposalRows = null) {
+    const proposals = proposalRows || proposalsApi.buildProposals(state);
+    const proposalTotals = selectors.proposalCounts(state, proposals);
+    const active = selectors.reservationCounts(state).active;
+    const week = selectors.reservationsThisWeek(state, anchorDate);
+    const out = selectors.kpis(state, anchorDate).equipmentOutToday;
+    const cards = [
+      {
+        tab: 'calendar',
+        title: 'Calendar',
+        line: 'Month view of every booking',
+        count: `${week} reservations this week`,
+        icon: ['M4 5.5h16v14H4z', 'M4 9.5h16M8 3v4M16 3v4'],
+      },
+      {
+        tab: 'equipment',
+        title: 'Equipment',
+        line: 'Stock, maintenance and availability',
+        count: `${out} items out today`,
+        icon: ['M4 8.5 12 4l8 4.5v7L12 20l-8-4.5v-7Z', 'M4 8.5 12 13l8-4.5M12 13v7'],
+      },
+      {
+        tab: 'reservations',
+        title: 'Reservations',
+        line: 'Search, filter and open a booking',
+        count: `${active} open reservations`,
+        icon: ['M6 3.5h12a1 1 0 0 1 1 1V21l-7-4-7 4V4.5a1 1 0 0 1 1-1Z', 'M9 8h6M9 11.5h6'],
+      },
+      {
+        tab: 'operations',
+        title: 'Operations',
+        line: 'Re-plan inbox for conflicts',
+        count: `${proposalTotals.pending} proposals awaiting approval`,
+        icon: ['M4 6h16M4 12h10M4 18h7', 'M17.5 10a2.2 2.2 0 1 0 0 4.4 2.2 2.2 0 0 0 0-4.4Z'],
+      },
+      {
+        tab: 'assistant',
+        title: 'Assistant',
+        line: 'Book, cancel or check availability',
+        count: `${selectors.customerCount(state)} customers on file`,
+        icon: ['M12 3.5 14.1 9l5.6 2.1-5.6 2.1L12 19l-2.1-5.8L4.3 11l5.6-2.1L12 3.5Z'],
+      },
+    ];
+    els.toolGrid.replaceChildren();
+    for (const card of cards) {
+      const node = el('button', undefined, 'tool-card');
+      node.type = 'button';
+      const icon = el('span', undefined, 'tool-icon');
+      icon.append(svgIcon(card.icon, 19));
+      node.append(icon, el('span', card.title, 'tool-name'), el('span', card.line, 'tool-line'), el('span', card.count, 'tool-count'));
+      node.addEventListener('click', () => showTab(card.tab));
+      els.toolGrid.append(node);
     }
-    for (const handoff of handoffs) {
-      const clause = handoff.clause
-        ? ` Clause ${handoff.clause.id} (${handoff.clause.title}): ${handoff.clause.text}`
-        : '';
-      els.handoffs.append(el('li', `${handoff.topic}: ${handoff.reason}${clause}`));
-    }
   }
 
-  function lockDecision(text) {
-    session.decided = true;
-    els.decision.textContent = text;
-    for (const button of els.resultsBody.querySelectorAll('button')) button.disabled = true;
-    els.decisionBlock.hidden = false;
-  }
+  // --- calendar ------------------------------------------------------------
 
-  function approvePlan(plan) {
-    if (!session || session.decided) return;
-    const scenario = selectedScenario();
-    if (!scenario) return;
-    let fresh;
-    try {
-      fresh = solver.solve(stateFor(scenario), cancellationFor(scenario));
-    } catch (error) {
-      hideResults(`Not applied: the solver failed (${error.message}). Solve again before approving.`);
-      return;
-    }
-    if (!approval.isCurrentPlan(plan, fresh)) {
-      hideResults('Not applied: the kit selection or inventory no longer matches this re-plan. Solve again before approving.');
-      return;
-    }
-    let next;
-    try {
-      next = solver.applyPlan(live, plan);
-    } catch (error) {
-      hideResults(`Not applied. ${error.message}. Solve again before approving.`);
-      return;
-    }
-    live = next;
-    lockDecision(approval.approvalMessage(plan));
-    renderInventory(live);
-    els.draft.textContent = draftClientMessage(plan);
-    renderDataViews();
-  }
-
-  function rejectAll() {
-    if (!session || session.decided) return;
-    lockDecision('Rejected the re-plan. No changes applied; the released kit stays with staff for manual handling. Inventory unchanged below.');
-    renderInventory(live);
-    els.draft.textContent = 'No client message drafted for a rejected re-plan.';
-  }
-
-  function inventoryStatus(state, res) {
-    const heldBy = state.bookings.find((booking) => booking.status === 'cancelled' && (booking.held || []).includes(res.id));
-    if (heldBy) return `held by staff (${heldBy.id} cancelled)`;
-    if (res.status === 'ok') return 'available';
-    if (res.status === 'maintenance') return `maintenance until ${res.maintenanceUntil || 'unknown'}`;
-    return `${res.status} (not offered)`;
-  }
-
-  function inventoryBadge(state, res) {
-    const text = inventoryStatus(state, res);
-    if (text.startsWith('held')) return badge('Held', 'held');
-    if (text.startsWith('maintenance')) return badge('Maintenance', 'maintenance');
-    if (text === 'available') return badge('Available', 'available');
-    return badge(res.status, 'muted');
-  }
-
-  function renderInventory(state) {
-    const head = el('tr');
-    for (const title of ['Item', 'Status', 'Active bookings']) {
-      const th = el('th', title);
-      th.scope = 'col';
-      head.append(th);
-    }
-    const thead = el('thead');
-    thead.append(head);
-    const body = el('tbody');
-    for (const res of state.resources) {
-      const holds = state.bookings
-        .filter((booking) => booking.status !== 'cancelled' && booking.assigned.includes(res.id))
-        .map((booking) => `${booking.id} ${booking.start} to ${booking.end}`);
-      const status = el('span', undefined, 'status-cell');
-      status.append(inventoryBadge(state, res), el('span', inventoryStatus(state, res), 'note'));
-      const row = el('tr');
-      row.append(
-        cell('Item', el('span', res.id, 'mono'), document.createTextNode(` ${res.label}`)),
-        cell('Status', status),
-        cell('Active bookings', document.createTextNode(holds.join('; ') || 'none')),
-      );
-      body.append(row);
-    }
-    els.inventory.replaceChildren(thead, body);
-  }
-
-  // Fixed template. Filled from solver output only; no LLM, not sent anywhere.
-  function draftClientMessage(plan) {
-    const items = plan.actions.map((action) => action.label).join(', ');
-    const consent = plan.status === 'full'
-      ? 'Please reply to confirm.'
-      : `We can offer ${plan.filled} of ${plan.required} requested items for these dates. Please reply to tell us whether this works for you.`;
-    return [
-      `To: ${plan.client}`,
-      `Subject: Kit and studio for ${plan.start} to ${plan.end}`,
-      '',
-      `Hello ${plan.client},`,
-      '',
-      `We can offer the following for ${plan.start} to ${plan.end}: ${items}.`,
-      consent,
-      '',
-      'Kind regards,',
-      `${house} operations team`,
-      '',
-      '(Template draft for demo purposes. Not sent.)',
-    ].join('\n');
-  }
-
-  // --- Calendar ------------------------------------------------------------
-
-  function bookingsOnDay(iso) {
-    const day = isoToDay(iso);
-    if (day === null) return [];
-    return activeBookings().filter((booking) => {
-      const start = isoToDay(booking.start);
-      const end = isoToDay(booking.end);
-      return start !== null && end !== null && start <= day && day <= end;
-    });
-  }
-
-  function initialiseCalendar() {
-    const starts = activeBookings()
-      .map((booking) => booking.start)
-      .filter((iso) => isoToDay(iso) !== null)
-      .sort();
-    const base = starts[0] || summaryApi.DEMO_REFERENCE_DATE;
-    const day = isoToDay(base);
-    const parts = dayToParts(day);
-    calendar = { year: parts.year, month: parts.month, selected: null, ready: true };
-  }
-
-  function loadCalendar() {
-    if (!loaded.calendar) {
-      loaded.calendar = true;
-      setState(els.calendarState, 'Loading calendar...', 'loading');
-      setTimeout(() => {
-        try {
-          if (!calendar.ready) initialiseCalendar();
-          renderCalendar();
-        } catch (error) {
-          setState(els.calendarState, `Calendar could not be read: ${error.message}`, 'error');
-        }
-      }, 0);
-      return;
-    }
-    renderCalendar();
-  }
-
-  function renderCalendar() {
-    if (!calendar.ready) initialiseCalendar();
+  function renderCalendar(state = store.getState()) {
+    const month = selectors.calendarMonth(state, calendar.year, calendar.month);
+    els.calMonth.textContent = month.label;
     setState(els.calendarState, '');
-    const { year, month } = calendar;
-    els.calMonth.textContent = `${MONTHS[month]} ${year}`;
-
-    const first = new Date(Date.UTC(year, month, 1));
-    const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-    const leading = (first.getUTCDay() + 6) % 7;
-    const monthBookings = new Set();
-
     const nodes = [];
-    for (const name of WEEKDAYS) {
+    for (const name of WEEKDAYS_SHORT) {
       const header = el('span', name, 'cal-weekday');
       header.setAttribute('aria-hidden', 'true');
       nodes.push(header);
     }
-    for (let i = 0; i < leading; i += 1) {
+    for (let index = 0; index < month.firstWeekday; index += 1) {
       const blank = el('span', undefined, 'cal-blank');
       blank.setAttribute('aria-hidden', 'true');
       nodes.push(blank);
     }
-
-    for (let date = 1; date <= daysInMonth; date += 1) {
-      const dayNumber = Date.UTC(year, month, date) / DAY_MS;
-      const iso = dayToParts(dayNumber).iso;
-      const dayBookings = bookingsOnDay(iso);
-      for (const booking of dayBookings) monthBookings.add(booking.id);
-      const button = el('button', undefined, 'cal-day');
-      button.type = 'button';
-      button.dataset.iso = iso;
-      button.setAttribute('aria-pressed', String(calendar.selected === iso));
-      button.setAttribute(
-        'aria-label',
-        `${date} ${MONTHS[month]} ${year}, ${dayBookings.length} reservation${dayBookings.length === 1 ? '' : 's'}`,
-      );
-      if (dayBookings.length) button.classList.add('has-bookings');
-      button.append(el('span', String(date), 'cal-daynum'));
-      if (dayBookings.length) {
-        const count = el('span', String(dayBookings.length), 'cal-count');
+    for (const day of month.days) {
+      const node = el('button', undefined, 'cal-day');
+      node.type = 'button';
+      node.dataset.date = day.date;
+      node.setAttribute('aria-pressed', String(calendar.selected === day.date));
+      node.setAttribute('aria-label', `${day.day} ${MONTHS[calendar.month]} ${calendar.year}, ${day.count} reservation${day.count === 1 ? '' : 's'}${day.hasConflict ? ', conflict' : ''}`);
+      if (day.count > 0) node.classList.add('has-bookings');
+      if (day.hasConflict) node.classList.add('is-conflict');
+      node.append(el('span', String(day.day), 'cal-daynum'));
+      if (day.count > 0) {
+        const count = el('span', `${day.count} booking${day.count === 1 ? '' : 's'}`, 'cal-count');
         count.setAttribute('aria-hidden', 'true');
-        const firstId = el('span', dayBookings[0].id, 'cal-id');
-        firstId.setAttribute('aria-hidden', 'true');
-        button.append(count, firstId);
+        node.append(count);
+        if (day.reservations[0]) {
+          const first = el('span', day.reservations[0].id, 'cal-id');
+          first.setAttribute('aria-hidden', 'true');
+          node.append(first);
+        }
       }
-      button.addEventListener('click', () => selectCalendarDay(iso));
-      nodes.push(button);
+      node.addEventListener('click', () => {
+        calendar.selected = day.date;
+        renderCalendar();
+        renderDayList();
+      });
+      nodes.push(node);
     }
     els.calendarGrid.replaceChildren(...nodes);
-
-    if (monthBookings.size === 0) {
-      els.calendarMonthNote.textContent = 'No reservations this month.';
-    } else {
-      els.calendarMonthNote.textContent = `${monthBookings.size} active reservation${monthBookings.size === 1 ? '' : 's'} this month.`;
-    }
-    renderDayList();
-    if (monthBookings.size === 0 && !calendar.selected) {
-      setState(els.dayState, 'No reservations this month. Select another month.', 'empty');
-    }
-  }
-
-  function selectCalendarDay(iso) {
-    calendar.selected = iso;
-    for (const button of els.calendarGrid.querySelectorAll('.cal-day')) {
-      button.setAttribute('aria-pressed', String(button.dataset.iso === iso));
-    }
+    els.calendarMonthNote.textContent = month.totalReservations === 0
+      ? 'No reservations this month.'
+      : `${month.totalReservations} active reservation${month.totalReservations === 1 ? '' : 's'} across ${month.totalDays} day${month.totalDays === 1 ? '' : 's'}.`;
     renderDayList();
   }
 
-  function renderDayList() {
+  function renderDayList(state = store.getState()) {
     els.dayList.replaceChildren();
-    const iso = calendar.selected;
-    if (!iso) {
+    els.dayCount.hidden = true;
+    if (!calendar.selected) {
       els.dayTitle.textContent = 'Select a day';
       setState(els.dayState, 'Select a day to see its reservations.', 'empty');
       return;
     }
-    const parts = dayToParts(isoToDay(iso));
-    els.dayTitle.textContent = `Reservations on ${parts.day} ${MONTHS[parts.month]} ${parts.year}`;
-    const list = bookingsOnDay(iso);
-    if (list.length === 0) {
+    const parts = parseIso(calendar.selected);
+    els.dayTitle.textContent = `${parts.date} ${MONTHS[parts.month]} ${parts.year}`;
+    const month = selectors.calendarMonth(state, parts.year, parts.month);
+    const day = month.days.find((row) => row.date === calendar.selected);
+    if (!day || day.count === 0) {
       setState(els.dayState, 'No reservations on this day.', 'empty');
       return;
     }
     setState(els.dayState, '');
-    for (const booking of list) {
+    els.dayCount.hidden = false;
+    els.dayCount.textContent = String(day.count);
+    for (const reservation of day.reservations) {
       const item = el('li', undefined, 'day-item');
       const head = el('div', undefined, 'day-item-head');
-      head.append(el('span', booking.id, 'mono strong'), statusBadge(booking.status));
+      const open = button(reservation.id, 'reservation-link', () => openReservation(reservation.id));
+      head.append(open, statusBadge(reservation.status));
       item.append(
         head,
-        el('p', booking.client, 'day-client'),
-        el('p', `${booking.start} to ${booking.end}`, 'mono note'),
-        el('p', `Items: ${booking.assigned.join(', ')}`, 'mono note'),
+        el('p', reservation.customerName, 'day-client'),
+        el('p', `${reservation.start} to ${reservation.end}`, 'mono note'),
+        el('p', reservation.itemsLabel, 'note'),
       );
       els.dayList.append(item);
     }
   }
 
-  function shiftMonth(delta) {
+  function shiftCalendar(delta) {
     const next = new Date(Date.UTC(calendar.year, calendar.month + delta, 1));
     calendar.year = next.getUTCFullYear();
     calendar.month = next.getUTCMonth();
     calendar.selected = null;
-    setState(els.calendarState, 'Loading calendar...', 'loading');
-    setTimeout(() => {
-      try {
-        renderCalendar();
-      } catch (error) {
-        setState(els.calendarState, `Calendar could not be read: ${error.message}`, 'error');
-      }
-    }, 0);
+    renderCalendar();
   }
 
-  // --- Equipment -----------------------------------------------------------
+  // --- equipment -----------------------------------------------------------
 
-  const EQUIPMENT_STATUS = {
-    available: { label: 'Available', variant: 'available' },
-    booked: { label: 'Booked', variant: 'booked' },
-    maintenance: { label: 'Maintenance', variant: 'maintenance' },
-    held: { label: 'Held', variant: 'held' },
-  };
-
-  function equipmentStatus(res) {
-    const heldBy = live.bookings.find((booking) => booking.status === 'cancelled' && (booking.held || []).includes(res.id));
-    if (heldBy) {
-      return {
-        label: EQUIPMENT_STATUS.held.label,
-        variant: EQUIPMENT_STATUS.held.variant,
-        booking: `Held by staff after ${heldBy.id} was cancelled`,
-      };
+  function populateCategoryFilter(seed) {
+    const categories = [...new Set(seed.equipment.map((item) => item.category))].sort();
+    for (const category of categories) {
+      const option = el('option', category.charAt(0).toUpperCase() + category.slice(1));
+      option.value = category;
+      els.equipmentFilter.append(option);
     }
-    if (res.status === 'maintenance') {
-      return {
-        label: EQUIPMENT_STATUS.maintenance.label,
-        variant: EQUIPMENT_STATUS.maintenance.variant,
-        booking: `Maintenance until ${res.maintenanceUntil || 'an unknown date'}`,
-      };
-    }
-    const holds = live.bookings.filter((booking) => booking.status !== 'cancelled' && booking.assigned.includes(res.id));
-    if (holds.length) {
-      return {
-        label: EQUIPMENT_STATUS.booked.label,
-        variant: EQUIPMENT_STATUS.booked.variant,
-        booking: holds.map((booking) => `${booking.id} (${booking.start} to ${booking.end})`).join('; '),
-      };
-    }
-    return {
-      label: EQUIPMENT_STATUS.available.label,
-      variant: EQUIPMENT_STATUS.available.variant,
-      booking: 'No active booking',
-    };
   }
 
-  function loadEquipment() {
-    if (!loaded.equipment) {
-      loaded.equipment = true;
-      setState(els.equipmentState, 'Loading equipment...', 'loading');
-      setTimeout(() => {
-        try {
-          renderEquipment();
-        } catch (error) {
-          setState(els.equipmentState, `Equipment could not be read: ${error.message}`, 'error');
-        }
-      }, 0);
-      return;
-    }
-    renderEquipment();
-  }
-
-  function renderEquipment() {
-    const kind = els.equipmentFilter.value;
-    const rows = live.resources.filter((res) => !kind || res.kind === kind);
-    els.equipmentCount.textContent = `${rows.length} of ${live.resources.length} items`;
+  function renderEquipment(state = store.getState()) {
+    const rows = selectors.equipmentRows(state, {
+      query: els.equipmentSearch.value,
+      category: els.equipmentFilter.value,
+      maintenance: els.equipmentStatus.value,
+      sort: equipmentSort.key,
+      dir: equipmentSort.dir,
+      today: anchorDate,
+    });
+    els.equipmentCount.textContent = `${rows.length} of ${selectors.equipmentCount(state)} stock lines`;
+    updateSortHeaders(els.equipmentTableWrap, equipmentSort);
     if (rows.length === 0) {
       els.equipmentTableWrap.hidden = true;
-      setState(els.equipmentState, 'No equipment matches this filter.', 'empty');
+      setState(els.equipmentState, 'No equipment matches these filters.', 'empty');
       return;
     }
     setState(els.equipmentState, '');
     els.equipmentTableWrap.hidden = false;
     const body = [];
-    for (const res of rows) {
-      const status = equipmentStatus(res);
+    for (const item of rows) {
       const row = el('tr');
-      const item = el('div', undefined, 'table-stack');
-      item.append(el('span', res.id, 'mono strong'), el('span', res.label, 'note'));
+      const name = el('div');
+      name.append(el('span', item.name, 'row-strong'), el('span', ` · ${item.brand}`, 'note'));
+      const outCell = el('span', undefined, 'status-cell');
+      outCell.append(el('span', `${item.out} of ${item.quantityOwned}`, item.out > item.quantityOwned ? 'qty-cell strong' : 'qty-cell'));
+      if (item.out > item.quantityOwned) outCell.append(badge('Overbooked', 'conflict'));
       row.append(
-        cell('Item', item),
-        cell('Kind', document.createTextNode(res.kind)),
-        cell('Mount', el('span', res.mount || 'Any', res.mount ? 'mono' : 'note')),
-        cell('Status', badge(status.label, status.variant)),
-        cell('Current booking', document.createTextNode(status.booking)),
+        cell('Item', name, el('span', item.stockId, 'mono note')),
+        cell('Category', document.createTextNode(item.category)),
+        cell('Owned', el('span', String(item.quantityOwned), 'qty-cell')),
+        cell('Out today', outCell),
+        cell('Location', document.createTextNode(item.location)),
+        cell('Maintenance', badge(item.maintenance === 'ok' ? 'OK' : item.maintenance === 'in repair' ? 'In repair' : 'Retired', item.maintenance === 'ok' ? 'ok' : item.maintenance === 'in repair' ? 'in-repair' : 'retired')),
       );
+      if (item.out > item.quantityOwned) row.classList.add('is-conflict-row');
       body.push(row);
     }
     els.equipmentRows.replaceChildren(...body);
   }
 
-  // --- Reservations --------------------------------------------------------
-
-  function statusBadge(status) {
-    if (status === 'cancelled') return badge('Cancelled', 'muted');
-    if (status === 'awaiting-client-consent') return badge('Awaiting consent', 'warn');
-    if (status === 'confirmed') return badge('Confirmed', 'booked');
-    return badge(status, 'muted');
-  }
-
-  function loadReservations() {
-    if (!loaded.reservations) {
-      loaded.reservations = true;
-      setState(els.reservationsState, 'Loading reservations...', 'loading');
-      setTimeout(() => {
-        try {
-          renderReservations();
-        } catch (error) {
-          setState(els.reservationsState, `Reservations could not be read: ${error.message}`, 'error');
-        }
-      }, 0);
-      return;
+  function updateSortHeaders(root, sort) {
+    const table = root.querySelector ? root.querySelector('table') || root : null;
+    if (!table) return;
+    for (const th of table.querySelectorAll('th[aria-sort]')) {
+      const sortButton = th.querySelector('.sort-button');
+      if (!sortButton) continue;
+      th.setAttribute('aria-sort', sortButton.dataset.sort === sort.key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none');
     }
-    renderReservations();
   }
 
-  function renderReservations() {
-    const filter = els.reservationFilter.value;
-    const query = els.reservationSearch.value.trim().toLowerCase();
-    const all = live.bookings;
-    const rows = all.filter((booking) => {
-      if (filter && booking.status !== filter) return false;
-      if (!query) return true;
-      return booking.id.toLowerCase().includes(query) || booking.client.toLowerCase().includes(query);
-    });
-    els.reservationCount.textContent = `${rows.length} of ${all.length} reservations`;
+  // --- reservations --------------------------------------------------------
+
+  function renderReservations(state = store.getState()) {
+    const filter = {
+      query: els.reservationSearch.value,
+      status: els.reservationFilter.value,
+      sort: reservationSort.key === 'qty' ? 'start' : reservationSort.key,
+      dir: reservationSort.dir,
+    };
+    let rows = selectors.reservationsFor(state, filter);
+    if (reservationSort.key === 'qty') {
+      rows.sort((a, b) => (a.totalQuantity - b.totalQuantity) * (reservationSort.dir === 'desc' ? -1 : 1));
+    }
+    els.reservationCount.textContent = `${rows.length} of ${selectors.reservationCounts(state).total} reservations`;
+    updateSortHeaders(els.reservationsTableWrap, reservationSort);
     if (rows.length === 0) {
       els.reservationsTableWrap.hidden = true;
       setState(els.reservationsState, 'No reservations match this filter.', 'empty');
@@ -967,65 +653,268 @@
     setState(els.reservationsState, '');
     els.reservationsTableWrap.hidden = false;
     const body = [];
-    for (const booking of rows) {
-      const row = el('tr');
-      row.id = `reservation-row-${booking.id}`;
-      row.tabIndex = -1;
-      row.append(
-        cell('Reservation', el('span', booking.id, 'mono strong')),
-        cell('Client', document.createTextNode(booking.client)),
-        cell('Dates', el('span', `${booking.start} to ${booking.end}`, 'mono')),
-        cell('Items', el('span', booking.assigned.join(', ') || 'None', 'mono items-cell')),
-        cell('Status', statusBadge(booking.status)),
+    for (const row of rows) {
+      const tr = el('tr');
+      tr.id = `reservation-row-${row.id}`;
+      tr.tabIndex = -1;
+      if (row.id === selectedReservationId) tr.classList.add('is-highlighted');
+      tr.append(
+        cell('Reservation', button(row.id, 'reservation-link', () => openReservation(row.id))),
+        cell('Customer', document.createTextNode(row.customerName)),
+        cell('Dates', el('span', `${row.start} to ${row.end}`, 'mono'), el('span', ` · ${row.status === 'returned' ? 'past' : 'booked'}`, 'note')),
+        cell('Items', el('span', row.itemsLabel || 'No items', 'items-cell')),
+        cell('Qty', el('span', String(row.totalQuantity), 'qty-cell')),
+        cell('Status', statusBadge(row.status)),
       );
-      body.push(row);
+      body.push(tr);
     }
     els.reservationRows.replaceChildren(...body);
+    if (selectedReservationId) renderReservationDetail(state);
   }
 
-  function openReservation(bookingId) {
-    els.reservationSearch.value = '';
-    els.reservationFilter.value = '';
-    loaded.reservations = true;
-    showTab('reservations', { focus: false });
-    renderReservations();
-    const row = $(`reservation-row-${bookingId}`);
-    if (!row) {
-      setState(els.reservationsState, `Reservation ${bookingId} is not in local data.`, 'error');
+  function openReservation(id) {
+    const state = store.getState();
+    const view = selectors.getReservation(state, id);
+    if (!view) {
+      showTab('reservations', { focus: false });
+      setState(els.reservationsState, `Reservation ${id} is not in the workspace.`, 'error');
       return;
     }
-    for (const candidate of els.reservationRows.querySelectorAll('tr')) candidate.classList.remove('is-highlighted');
-    row.classList.add('is-highlighted');
-    row.focus({ preventScroll: true });
-    row.scrollIntoView({ block: 'center' });
+    selectedReservationId = id;
+    els.reservationSearch.value = '';
+    els.reservationFilter.value = '';
+    showTab('reservations', { focus: false });
+    renderReservations(state);
+    renderReservationDetail(state);
+    const row = $(`reservation-row-${id}`);
+    if (row) {
+      row.classList.add('is-highlighted');
+      row.focus({ preventScroll: true });
+      row.scrollIntoView({ block: 'center' });
+    }
+    els.reservationDetail.scrollIntoView({ block: 'nearest' });
   }
 
-  // --- Assistant -----------------------------------------------------------
+  function renderReservationDetail(state = store.getState()) {
+    const view = selectedReservationId ? selectors.getReservation(state, selectedReservationId) : null;
+    if (!view) {
+      els.reservationDetail.hidden = true;
+      els.reservationDetailBody.replaceChildren();
+      return;
+    }
+    els.reservationDetail.hidden = false;
+    els.reservationDetailTitle.textContent = `Reservation ${view.id}`;
+    const grid = el('div', undefined, 'detail-grid');
+    for (const [label, value] of [
+      ['Customer', view.customerName],
+      ['Type', view.customerType || '—'],
+      ['Status', STATUS_BADGES[view.status]?.label || view.status],
+      ['Pickup', shortDate(view.start)],
+      ['Return', shortDate(view.end)],
+      ['Total quantity', String(view.totalQuantity)],
+    ]) {
+      const block = el('div', undefined, 'detail-block');
+      block.append(el('p', label, 'detail-label'), el('p', value, 'detail-value'));
+      grid.append(block);
+    }
+    const items = el('ul', undefined, 'detail-items');
+    for (const item of view.itemsDetailed) {
+      const li = el('li');
+      li.append(
+        el('span', `${item.name} (${item.stockId})`),
+        el('span', `${item.quantity} ×`, 'mono strong'),
+      );
+      items.append(li);
+    }
+    const note = el('p', 'This record is live. Changes from the assistant, the manual panel and Operations all update it.', 'note');
+    els.reservationDetailBody.replaceChildren(grid, items, note);
+  }
 
-  const assistant = assistantApi.createAssistant({
-    getTools: () => {
-      const base = toolsApi.createTools(() => live);
-      return {
-        cancel_reservation: base.cancel_reservation,
-        check_availability: base.check_availability,
-        solve_replan(bookingId, releasedIds) {
-          const result = base.solve_replan(bookingId, releasedIds);
-          if (result.ok) {
-            replansRun += 1;
-            renderSummary();
-          }
-          return result;
-        },
-      };
-    },
-    getState: () => live,
-  });
+  // --- operations ----------------------------------------------------------
 
-  function solverCallBlock(call) {
-    const details = el('details', undefined, 'solver-call');
-    details.append(el('summary', `Solver call: ${call.name}`));
-    const body = el('div', undefined, 'solver-call-body');
-    body.append(el('p', `Tool: ${call.name}`, 'solver-tool'));
+  function filterProposals(proposals) {
+    const mode = els.proposalFilter.value;
+    if (mode === 'all') return proposals;
+    if (mode === 'pending' || mode === 'human') return proposals.filter((proposal) => proposal.status === mode);
+    if (mode === 'resolved') return proposals.filter((proposal) => proposal.status === 'approved' || proposal.status === 'rejected');
+    return proposals.filter((proposal) => proposal.status === 'pending' || proposal.status === 'human');
+  }
+
+  function renderOperations(state = store.getState(), highlightId = null, proposalRows = null) {
+    let proposals;
+    try {
+      const rows = proposalRows || proposalsApi.buildProposals(state);
+      proposals = filterProposals(rows);
+    } catch (error) {
+      setState(els.proposalState, `Proposals could not be built: ${error.message}`, 'error');
+      return;
+    }
+    els.proposalCount.textContent = `${proposals.length} proposal${proposals.length === 1 ? '' : 's'}`;
+    if (proposals.length === 0) {
+      els.proposalList.replaceChildren();
+      setState(els.proposalState, 'No proposals in this view. New cancellations and conflicts appear here automatically.', 'empty');
+      return;
+    }
+    setState(els.proposalState, '');
+    const nodes = proposals.map((proposal) => proposalCard(proposal, highlightId));
+    els.proposalList.replaceChildren(...nodes);
+    if (highlightId) {
+      const node = els.proposalList.querySelector(`[data-proposal="${highlightId}"]`);
+      if (node) {
+        node.classList.add('is-highlighted');
+        node.scrollIntoView({ block: 'center' });
+      }
+    }
+  }
+
+  function highlightProposal(id) {
+    els.proposalFilter.value = 'all';
+    renderOperations(store.getState(), id);
+  }
+
+  function proposalCard(proposal, highlightId) {
+    const item = el('li', undefined, `proposal is-${proposal.status}${proposal.id === highlightId ? ' is-highlighted' : ''}`);
+    item.dataset.proposal = proposal.id;
+
+    const head = el('div', undefined, 'proposal-head');
+    const titleWrap = el('div');
+    titleWrap.append(
+      el('p', `${proposal.id} · ${proposal.reason === 'cancellation' ? 'Cancellation' : 'Conflict'}`, 'proposal-id'),
+      el('p', proposal.summary, 'proposal-title'),
+    );
+    const badges = el('div', undefined, 'proposal-badges');
+    badges.append(
+      badge(proposal.reason === 'cancellation' ? 'Cancellation' : 'Conflict', proposal.reason === 'cancellation' ? 'pending' : 'conflict'),
+      badge(FEASIBILITY_BADGES[proposal.feasibility].label, FEASIBILITY_BADGES[proposal.feasibility].variant),
+      badge(PROPOSAL_STATUS[proposal.status].label, PROPOSAL_STATUS[proposal.status].variant),
+    );
+    if (proposal.unresolved) badges.append(badge('Unresolved', 'conflict'));
+    head.append(titleWrap, badges);
+
+    const meta = el('div', undefined, 'proposal-meta');
+    if (proposal.reservationId) {
+      meta.append(button(`Reservation ${proposal.reservationId}`, 'proposal-link', () => openReservation(proposal.reservationId)));
+    }
+    meta.append(
+      el('span', proposal.assignedTo === 'Human dispatcher' ? 'Assigned to a human dispatcher' : 'Assigned to Operations'),
+      el('span', `Solver ${Number(proposal.solverMs).toFixed(2)} ms`, 'solver-time'),
+    );
+
+    const detail = el('p', proposal.detail, 'proposal-detail');
+
+    const sections = [];
+    if (proposal.freedItems.length) {
+      const section = el('section', undefined, 'proposal-section');
+      section.append(el('h4', 'Freed items'));
+      const list = el('ul');
+      for (const row of proposal.freedItems) {
+        list.append(el('li', `${row.quantity} × ${row.name} (${row.stockId})`));
+      }
+      section.append(list);
+      sections.push(section);
+    }
+    const moves = el('section', undefined, 'proposal-section');
+    moves.append(el('h4', 'Plan actions'));
+    if (proposal.actionLabels.length) {
+      const list = el('ul');
+      for (const label of proposal.actionLabels) list.append(el('li', label));
+      moves.append(list);
+    } else {
+      moves.append(el('p', 'No plan actions. The proposal is assigned to a human dispatcher.', 'note'));
+    }
+    sections.push(moves);
+
+    const actions = el('div', undefined, 'proposal-actions');
+    if (proposal.status === 'pending') {
+      actions.append(
+        button('Approve plan', 'btn btn-primary', () => decideProposal(proposal.id, 'approve')),
+        button('Reject', 'btn btn-secondary', () => decideProposal(proposal.id, 'reject')),
+      );
+    } else if (proposal.status === 'human') {
+      actions.append(
+        button('Dismiss proposal', 'btn btn-secondary', () => decideProposal(proposal.id, 'reject')),
+      );
+    } else {
+      actions.append(el('span', proposal.status === 'approved' ? 'Plan applied to the reservations.' : 'Rejected. Reservations were left unchanged.', 'note'));
+      if (proposal.unresolved) {
+        actions.append(el('span', ' The conflict is still open; a new proposal version covers it.', 'note'));
+      }
+    }
+
+    item.append(head, meta, detail, ...sections, actions);
+    return item;
+  }
+
+  function decideProposal(id, decision) {
+    const result = decision === 'approve' ? store.approveProposal(id) : store.rejectProposal(id);
+    if (!result.ok) {
+      setState(els.proposalState, result.error, 'error');
+      return;
+    }
+    setState(els.proposalState, '');
+  }
+
+  // --- assistant -----------------------------------------------------------
+
+  function appendOpeningMessage() {
+    els.chatLog.replaceChildren();
+    const item = el('li', undefined, 'chat-message chat-assistant');
+    item.setAttribute('role', 'note');
+    item.append(el('span', 'Assistant', 'sr-only'), el('p', assistantApi.OPENING));
+    els.chatLog.append(item);
+  }
+
+  function setupChatChips() {
+    renderAssistantChips();
+  }
+
+  function renderAssistantChips() {
+    if (!store) return;
+    const state = store.getState();
+    const start = shiftIso(anchorDate, 10);
+    const end = shiftIso(anchorDate, 12);
+    let best = null;
+    for (const item of state.equipment) {
+      if (item.maintenance !== 'ok') continue;
+      const free = selectors.availableQuantity(state, item.stockId, start, end);
+      if (free > 0 && (!best || free > best.free)) best = { item, free };
+    }
+    const bookStart = shiftIso(anchorDate, 20);
+    const bookEnd = shiftIso(anchorDate, 22);
+    let bookItem = null;
+    for (const item of state.equipment) {
+      if (item.maintenance !== 'ok') continue;
+      if (selectors.availableQuantity(state, item.stockId, bookStart, bookEnd) > 0) {
+        bookItem = item;
+        break;
+      }
+    }
+    const active = state.reservations.find((reservation) => reservation.status === 'confirmed');
+    const prompts = [];
+    if (best) prompts.push(`Check availability of ${best.item.stockId} from ${start} to ${end}`);
+    if (bookItem) prompts.push(`Book 1 × ${bookItem.stockId} for Nordlys Film from ${bookStart} to ${bookEnd}`);
+    if (active) prompts.push(`Cancel ${active.id}`);
+    prompts.push('Show customer Nordlys Film');
+    els.chatChips.replaceChildren();
+    for (const prompt of prompts) {
+      const chip = button(prompt, 'chip', () => {
+        els.chatInput.value = prompt;
+        submitChat(new Event('submit', { cancelable: true }));
+      });
+      els.chatChips.append(chip);
+    }
+  }
+
+  function shiftIso(iso, days) {
+    const parts = parseIso(iso);
+    return isoFromParts(parts.year, parts.month, parts.date + days);
+  }
+
+  function toolCallBlock(call) {
+    const details = el('details', undefined, 'tool-call');
+    details.append(el('summary', `Tool call: ${call.name}`));
+    const body = el('div', undefined, 'tool-call-body');
+    body.append(el('p', `Tool: ${call.name}`, 'tool-name-line'));
     const pre = el('pre');
     pre.textContent = JSON.stringify({ tool: call.name, input: call.input, output: call.output }, null, 2);
     body.append(pre);
@@ -1033,32 +922,55 @@
     return details;
   }
 
-  function appendChatMessage(role, response) {
-    const failed = response.status === 'error';
+  function confirmationCard(confirmation) {
+    const wrap = el('div', undefined, 'confirm-card');
+    wrap.append(el('h3', 'Confirm before saving'));
+    const grid = el('div', undefined, 'confirm-grid');
+    for (const [label, value] of [
+      ['Customer', confirmation.customerName],
+      ['Dates', `${confirmation.start} to ${confirmation.end}`],
+      ['Lines', String(confirmation.items.length)],
+      ['Total quantity', String(confirmation.totalQuantity)],
+    ]) {
+      const block = el('div');
+      block.append(el('p', label, 'confirm-label'), el('p', value, 'confirm-value'));
+      grid.append(block);
+    }
+    const items = el('ul', undefined, 'confirm-items');
+    for (const row of confirmation.items) {
+      items.append(el('li', `${row.name} (${row.stockId})`, el('span', `${row.quantity} ×`, 'mono')));
+    }
+    wrap.append(grid, items, el('p', `Total quantity: ${confirmation.totalQuantity}`, 'confirm-total'));
+    return wrap;
+  }
+
+  function appendChatMessage(role, payload) {
+    const failed = payload.status === 'error';
     const item = el('li', undefined, `chat-message chat-${role}${failed ? ' chat-error' : ''}`);
     if (failed) item.setAttribute('role', 'alert');
     item.append(el('span', role === 'user' ? 'You' : 'Assistant', 'sr-only'));
-    for (const paragraph of String(response.text || '').split('\n\n')) {
+    for (const paragraph of String(payload.text || '').split('\n\n')) {
       if (paragraph.trim()) item.append(el('p', paragraph));
     }
-    for (const action of response.actions || []) {
-      if (action.type !== 'open-reservation') continue;
-      const button = el('button', action.label, 'btn btn-secondary chat-action');
-      button.type = 'button';
-      button.addEventListener('click', () => openReservation(action.bookingId));
-      item.append(button);
+    if (payload.confirmation && payload.confirmation.items) item.append(confirmationCard(payload.confirmation));
+    const actions = el('div', undefined, 'chat-actions');
+    for (const action of payload.actions || []) {
+      if (action.type === 'open-reservation') {
+        actions.append(button(action.label, 'btn btn-secondary chat-action', () => openReservation(action.reservationId)));
+      }
+      if (action.type === 'open-operations') {
+        actions.append(button(action.label, 'btn btn-secondary chat-action', () => showTab('operations')));
+      }
     }
-    for (const call of response.toolCalls || []) item.append(solverCallBlock(call));
-    if (role === 'assistant') {
-      item.append(el('p', `Rule-based reply · ${assistantApi.LLM_CALLS} LLM calls`, 'assistant-meta'));
-    }
+    if (actions.childElementCount) item.append(actions);
+    for (const call of payload.toolCalls || []) item.append(toolCallBlock(call));
     els.chatLog.append(item);
     els.chatLog.scrollTop = els.chatLog.scrollHeight;
   }
 
   function submitChat(event) {
-    event.preventDefault();
-    if (assistantBusy) return;
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+    if (!store || assistantBusy) return;
     const text = els.chatInput.value.trim();
     if (!text) {
       els.chatStatus.textContent = 'Type a message first.';
@@ -1071,8 +983,7 @@
     els.chatLog.setAttribute('aria-busy', 'true');
     els.chatSend.disabled = true;
     els.chatInput.disabled = true;
-    els.chatStatus.textContent = 'Checking the rule set and the deterministic solver...';
-    // One frame is enough for the loading state; there is no artificial delay.
+    els.chatStatus.textContent = 'Checking the live records…';
     setTimeout(() => {
       try {
         appendChatMessage('assistant', assistant.handle(text));
@@ -1092,110 +1003,496 @@
     }, 0);
   }
 
-  // --- Scope card ----------------------------------------------------------
+  // --- manual panel --------------------------------------------------------
 
-  function openScope() {
-    els.scopeCard.hidden = false;
-    els.scopeLink.setAttribute('aria-expanded', 'true');
-    els.scopeCard.scrollIntoView({ block: 'nearest' });
-    els.scopeTitle.focus();
+  function openPanel() {
+    if (!store) return;
+    lastFocus = document.activeElement;
+    panel.customerId = null;
+    panel.customerName = null;
+    panel.items = [];
+    els.panelCustomerSearch.value = '';
+    els.panelCustomerResults.replaceChildren();
+    els.panelCustomerSelected.hidden = true;
+    els.panelCustomerSelected.replaceChildren();
+    els.panelStart.value = shiftIso(anchorDate, 7);
+    els.panelEnd.value = shiftIso(anchorDate, 9);
+    els.panelItemSearch.value = '';
+    els.panelItemResults.replaceChildren();
+    setState(els.panelError, '');
+    els.panelBackdrop.hidden = false;
+    els.panel.hidden = false;
+    renderPanelItems();
+    updatePanelAvailability();
+    setTimeout(() => els.panelCustomerSearch.focus(), 0);
+    renderPanelCustomerResults('');
   }
 
-  function closeScope() {
-    els.scopeCard.hidden = true;
-    els.scopeLink.setAttribute('aria-expanded', 'false');
-    els.scopeLink.focus();
+  function closePanel() {
+    els.panel.hidden = true;
+    els.panelBackdrop.hidden = true;
+    setState(els.panelError, '');
+    if (lastFocus && typeof lastFocus.focus === 'function') lastFocus.focus();
   }
 
-  // --- init ----------------------------------------------------------------
-
-  function populateFilters() {
-    const kinds = [...new Set(live.resources.map((res) => res.kind))].sort();
-    for (const kind of kinds) {
-      const option = el('option', kind.charAt(0).toUpperCase() + kind.slice(1));
-      option.value = kind;
-      els.equipmentFilter.append(option);
+  function renderPanelCustomerResults(query) {
+    els.panelCustomerResults.replaceChildren();
+    const state = store.getState();
+    const matches = selectors.customerMatches(state, query, 6);
+    if (!query && matches.length === 0) return;
+    for (const customer of matches) {
+      const node = el('li');
+      const result = button('', 'search-result', () => selectPanelCustomer(customer));
+      const body = el('span');
+      body.append(el('strong', customer.name), el('span', `${customer.id} · ${customer.clientType}`, 'search-result-meta'));
+      result.append(body);
+      node.append(result);
+      els.panelCustomerResults.append(node);
     }
   }
 
-  function updateLlmLabels() {
-    for (const node of document.querySelectorAll('.js-llm-calls')) {
-      node.textContent = node.classList.contains('badge')
-        ? `LLM calls: ${assistantApi.LLM_CALLS}`
-        : `${assistantApi.LLM_CALLS} LLM calls`;
+  function selectPanelCustomer(customer) {
+    panel.customerId = customer.id;
+    panel.customerName = customer.name;
+    els.panelCustomerSearch.value = customer.name;
+    els.panelCustomerResults.replaceChildren();
+    els.panelCustomerSelected.hidden = false;
+    els.panelCustomerSelected.replaceChildren(
+      el('strong', customer.name),
+      el('span', `${customer.id} · ${customer.clientType}`, 'note'),
+      el('span', `${customer.contact.email} · ${customer.contact.phone}`, 'note'),
+    );
+    updatePanelAvailability();
+  }
+
+  function renderPanelItemResults(query) {
+    els.panelItemResults.replaceChildren();
+    if (!query) return;
+    const state = store.getState();
+    const matches = selectors.itemMatches(state, query, 8).filter((item) => !panel.items.some((row) => row.stockId === item.stockId));
+    for (const item of matches) {
+      const start = els.panelStart.value.trim();
+      const end = els.panelEnd.value.trim();
+      const free = toDay(start) !== null && toDay(end) !== null
+        ? selectors.availableQuantity(state, item.stockId, start, end)
+        : null;
+      const node = el('li');
+      const result = button('', 'search-result', () => addPanelItem(item));
+      const body = el('span');
+      body.append(el('strong', `${item.name} (${item.stockId})`), el('span', `${item.category} · ${item.quantityOwned} owned${free === null ? '' : ` · ${free} free`}`, 'search-result-meta'));
+      result.append(body, badge(item.maintenance === 'ok' ? 'OK' : item.maintenance, item.maintenance === 'ok' ? 'ok' : 'in-repair'));
+      node.append(result);
+      els.panelItemResults.append(node);
     }
   }
 
-  for (const scenario of scenarios) els.scenarios.append(scenarioCard(scenario));
-  els.kit.addEventListener('change', onKitChange);
-  els.solve.addEventListener('click', onSolve);
-  els.reject.addEventListener('click', rejectAll);
-
-  for (const button of els.navTabs) {
-    button.addEventListener('click', () => showTab(button.dataset.tab));
-  }
-  document.querySelector('.primary-nav').addEventListener('keydown', onNavKeydown);
-  els.menuToggle.addEventListener('click', () => {
-    if (document.body.classList.contains('nav-open')) closeMenu();
-    else openMenu();
-  });
-  els.navBackdrop.addEventListener('click', () => {
-    closeMenu();
-    els.menuToggle.focus();
-  });
-
-  els.calPrev.addEventListener('click', () => shiftMonth(-1));
-  els.calNext.addEventListener('click', () => shiftMonth(1));
-  els.equipmentFilter.addEventListener('change', renderEquipment);
-  els.reservationSearch.addEventListener('input', renderReservations);
-  els.reservationFilter.addEventListener('change', renderReservations);
-
-  els.chatForm.addEventListener('submit', submitChat);
-  for (const chip of document.querySelectorAll('.chip')) {
-    chip.addEventListener('click', () => {
-      els.chatInput.value = chip.dataset.prompt || '';
-      if (typeof els.chatForm.requestSubmit === 'function') els.chatForm.requestSubmit();
-      else els.chatForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-    });
+  function addPanelItem(item) {
+    if (panel.items.some((row) => row.stockId === item.stockId)) return;
+    panel.items.push({ stockId: item.stockId, name: item.name, quantityInput: '1' });
+    els.panelItemSearch.value = '';
+    els.panelItemResults.replaceChildren();
+    renderPanelItems();
+    updatePanelAvailability();
   }
 
-  els.scopeLink.addEventListener('click', () => {
-    if (els.scopeCard.hidden) openScope();
-    else closeScope();
-  });
-  els.scopeClose.addEventListener('click', closeScope);
+  function renderPanelItems() {
+    els.panelItems.replaceChildren();
+    if (panel.items.length === 0) {
+      els.panelItems.append(el('li', 'No items yet. Search above and add a line.', 'note'));
+      return;
+    }
+    for (const row of panel.items) {
+      const item = el('li', undefined, 'panel-item');
+      const top = el('div', undefined, 'panel-item-top');
+      const name = el('div');
+      name.append(el('span', row.name, 'panel-item-name'), el('span', row.stockId, 'panel-item-meta'));
+      const remove = el('button', 'Remove', 'btn btn-secondary');
+      remove.type = 'button';
+      remove.setAttribute('aria-label', `Remove ${row.name}`);
+      remove.addEventListener('click', () => {
+        panel.items = panel.items.filter((candidate) => candidate.stockId !== row.stockId);
+        renderPanelItems();
+        updatePanelAvailability();
+      });
+      top.append(name, remove);
 
-  document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape') return;
-    if (!els.scopeCard.hidden) {
+      const controls = el('div', undefined, 'panel-item-controls');
+      const label = el('label', 'Quantity');
+      label.htmlFor = `panel-qty-${row.stockId}`;
+      const input = el('input');
+      input.type = 'text';
+      input.inputMode = 'numeric';
+      input.pattern = '[0-9]*';
+      input.autocomplete = 'off';
+      input.id = `panel-qty-${row.stockId}`;
+      input.dataset.stockId = row.stockId;
+      input.className = 'qty-input';
+      input.value = row.quantityInput === undefined ? String(row.quantity ?? '1') : row.quantityInput;
+      input.addEventListener('input', () => {
+        // Keep the raw string; validation happens in updatePanelAvailability and
+        // again on submit, so "2.5" or "-3" is never silently coerced.
+        row.quantityInput = input.value;
+        updatePanelAvailability();
+      });
+      controls.append(label, input);
+      const availability = el('p', '', 'item-availability');
+      availability.dataset.for = row.stockId;
+      item.append(top, controls, availability);
+      els.panelItems.append(item);
+    }
+  }
+
+  function updatePanelAvailability() {
+    if (!store || els.panel.hidden) return;
+    const state = store.getState();
+    const start = els.panelStart.value.trim();
+    const end = els.panelEnd.value.trim();
+    const rows = [];
+    const invalid = new Map();
+    for (const row of panel.items) {
+      const parsed = parseQuantityInput(row.quantityInput);
+      if (parsed.ok) {
+        row.quantity = parsed.quantity;
+        rows.push({ stockId: row.stockId, quantity: parsed.quantity });
+      } else {
+        invalid.set(row.stockId, parsed.error);
+      }
+    }
+    setState(els.panelError, '');
+    els.panelAlternatives.hidden = true;
+    els.panelAlternatives.replaceChildren();
+
+    for (const node of els.panelItems.querySelectorAll('.item-availability')) {
+      if (invalid.has(node.dataset.for)) {
+        node.textContent = invalid.get(node.dataset.for);
+        node.className = 'item-availability is-invalid';
+      } else {
+        node.textContent = '';
+        node.className = 'item-availability';
+      }
+    }
+    for (const input of els.panelItems.querySelectorAll('.qty-input')) {
+      input.setAttribute('aria-invalid', invalid.has(input.dataset.stockId) ? 'true' : 'false');
+    }
+    if (invalid.size > 0) {
+      els.panelAvailability.className = 'availability-box is-short';
+      els.panelAvailability.textContent = 'Fix the highlighted quantity before saving.';
+      els.panelSubmit.disabled = true;
+      return;
+    }
+
+    if (rows.length === 0 || !start || !end) {
+      els.panelAvailability.className = 'availability-box';
+      els.panelAvailability.textContent = rows.length === 0
+        ? 'Add at least one item to see availability.'
+        : 'Add both dates to see availability.';
+      els.panelSubmit.disabled = true;
+      return;
+    }
+
+    const check = selectors.checkItems(state, { start, end, items: rows });
+    const availabilityFor = new Map(check.items.map((item) => [item.stockId, item]));
+    for (const node of els.panelItems.querySelectorAll('.item-availability')) {
+      const item = availabilityFor.get(node.dataset.for);
+      if (!item) continue;
+      if (item.short > 0) {
+        node.textContent = `${item.reason ? `${item.reason} ` : ''}Short by ${item.short}: ${item.available} available of ${item.requested}.`;
+        node.className = 'item-availability is-short';
+      } else {
+        node.textContent = `${item.available} available of ${item.requested} requested.`;
+        node.className = 'item-availability is-free';
+      }
+    }
+
+    if (!check.ok) {
+      els.panelAvailability.className = 'availability-box is-short';
+      els.panelAvailability.textContent = check.error;
+      els.panelSubmit.disabled = true;
+      return;
+    }
+
+    if (check.feasible) {
+      els.panelAvailability.className = 'availability-box is-free';
+      els.panelAvailability.textContent = `Available for ${start} to ${end}. ${rows.reduce((sum, row) => sum + row.quantity, 0)} total item(s).`;
+      els.panelSubmit.disabled = !panel.customerId;
+      return;
+    }
+
+    els.panelAvailability.className = 'availability-box is-short';
+    els.panelAvailability.textContent = `Blocked: ${check.items.filter((item) => item.short > 0).map((item) => item.reason || `${item.stockId} short by ${item.short}`).join('; ')}. Nothing will be saved.`;
+    els.panelSubmit.disabled = true;
+    renderPanelAlternatives(check.alternatives, start, end);
+  }
+
+  function renderPanelAlternatives(alternatives, start, end) {
+    if (!alternatives) return;
+    const dates = alternatives.dates || [];
+    const itemRows = selectors.swapAlternatives(
+      panel.items,
+      (alternatives.items || []).filter((row) => row.alternatives && row.alternatives.length),
+    );
+    if (dates.length === 0 && itemRows.length === 0) return;
+    els.panelAlternatives.hidden = false;
+    const nodes = [el('h4', 'Nearest alternatives')];
+    for (const row of dates) {
+      nodes.push(button(`Use ${row.start} to ${row.end}`, 'chip', () => {
+        els.panelStart.value = row.start;
+        els.panelEnd.value = row.end;
+        updatePanelAvailability();
+      }));
+    }
+    for (const row of itemRows) {
+      for (const alternative of row.alternatives) {
+        nodes.push(button(`Swap ${row.stockId} for ${alternative.stockId} (${alternative.available} free)`, 'chip', () => {
+          if (panel.items.some((item) => item.stockId === alternative.stockId)) return;
+          const target = panel.items.find((item) => item.stockId === row.stockId);
+          if (target) {
+            target.stockId = alternative.stockId;
+            target.name = alternative.name;
+          }
+          renderPanelItems();
+          updatePanelAvailability();
+        }));
+      }
+    }
+    els.panelAlternatives.replaceChildren(...nodes);
+  }
+
+  function trapPanelFocus(event) {
+    if (event.key !== 'Tab' || els.panel.hidden) return;
+    const focusable = [...els.panel.querySelectorAll('button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])')]
+      .filter((node) => !node.disabled && node.offsetParent !== null);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
       event.preventDefault();
-      closeScope();
-    } else if (document.body.classList.contains('nav-open')) {
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function submitPanel(event) {
+    event.preventDefault();
+    if (!store) return;
+    if (!panel.customerId) {
+      setState(els.panelError, 'Choose a customer before saving.', 'error');
+      els.panelCustomerSearch.focus();
+      return;
+    }
+    if (panel.items.length === 0) {
+      setState(els.panelError, 'Add at least one item before saving.', 'error');
+      return;
+    }
+    const rows = [];
+    for (const row of panel.items) {
+      const parsed = parseQuantityInput(row.quantityInput);
+      if (!parsed.ok) {
+        setState(els.panelError, `Quantity for ${row.stockId}: ${parsed.error}`, 'error');
+        const input = $(`panel-qty-${row.stockId}`);
+        if (input) input.focus();
+        return;
+      }
+      row.quantity = parsed.quantity;
+      rows.push({ stockId: row.stockId, quantity: parsed.quantity });
+    }
+    const dateProblem = rangeProblem('Reservation', els.panelStart.value.trim(), els.panelEnd.value.trim());
+    if (dateProblem) {
+      setState(els.panelError, dateProblem, 'error');
+      return;
+    }
+    const result = store.commitReservation({
+      customerId: panel.customerId,
+      start: els.panelStart.value.trim(),
+      end: els.panelEnd.value.trim(),
+      items: rows,
+    });
+    if (!result.ok) {
+      setState(els.panelError, result.error, 'error');
+      if (result.alternatives) renderPanelAlternatives(result.alternatives, els.panelStart.value.trim(), els.panelEnd.value.trim());
+      return;
+    }
+    closePanel();
+  }
+
+  // --- toast ---------------------------------------------------------------
+
+  function toastForEvent(event) {
+    const labels = {
+      'reservation.created': 'Open reservation',
+      'reservation.cancelled': 'Open reservation',
+      'proposal.approved': 'Open reservation',
+      'proposal.rejected': 'Open reservation',
+    };
+    let summary = event.summary;
+    if (!summary) {
+      const known = {
+        'reservation.created': 'Reservation created',
+        'reservation.cancelled': 'Reservation cancelled',
+        'proposal.approved': 'Proposal approved',
+        'proposal.rejected': 'Proposal rejected',
+        'store.reset': 'Workspace reset',
+      };
+      summary = known[event.type] || 'Change saved';
+    }
+    const reservationId = event.reservationId || event.proposal?.reservationId || null;
+    const target = reservationId ? () => openReservation(reservationId) : null;
+    showToast(summary, target ? `${labels[event.type] || 'Open'} ${reservationId}` : null, target);
+  }
+
+  function showToast(text, linkLabel, onClick) {
+    if (toastTimer) clearTimeout(toastTimer);
+    els.toastText.textContent = text;
+    if (linkLabel && onClick) {
+      els.toastLink.hidden = false;
+      els.toastLink.textContent = linkLabel;
+      els.toastLink.onclick = (event) => {
+        if (event) event.preventDefault();
+        hideToast();
+        onClick();
+      };
+    } else {
+      els.toastLink.hidden = true;
+      els.toastLink.textContent = 'Open reservation';
+      els.toastLink.onclick = null;
+    }
+    els.toast.hidden = false;
+    toastTimer = setTimeout(hideToast, 7000);
+  }
+
+  function hideToast() {
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = null;
+    els.toast.hidden = true;
+  }
+
+  // --- render all ----------------------------------------------------------
+
+  function renderAll(state = store.getState()) {
+    try {
+      let proposalRows = null;
+      try {
+        proposalRows = proposalsApi.buildProposals(state);
+      } catch (error) {
+        proposalRows = null;
+      }
+      renderHome(state, proposalRows);
+      renderNav(state, proposalRows || undefined);
+      renderCalendar(state);
+      renderEquipment(state);
+      renderReservations(state);
+      renderOperations(state, null, proposalRows);
+    } catch (error) {
+      setState(els.attentionState, `The workspace could not be rendered: ${error.message}`, 'error');
+    }
+  }
+
+  // --- events --------------------------------------------------------------
+
+  function bindEvents() {
+    for (const tabButton of els.navTabs) {
+      tabButton.addEventListener('click', () => showTab(tabButton.dataset.tab));
+    }
+    document.querySelector('.primary-nav').addEventListener('keydown', onNavKeydown);
+    els.menuToggle.addEventListener('click', () => {
+      if (document.body.classList.contains('nav-open')) closeMenu();
+      else openMenu();
+    });
+    els.navBackdrop.addEventListener('click', () => {
       closeMenu();
       els.menuToggle.focus();
-    }
-  });
+    });
 
-  if (typeof window.matchMedia === 'function') {
-    const desktop = window.matchMedia('(min-width: 1024px)');
-    const onChange = () => {
-      if (desktop.matches) closeMenu();
-    };
-    if (typeof desktop.addEventListener === 'function') desktop.addEventListener('change', onChange);
+    els.calPrev.addEventListener('click', () => shiftCalendar(-1));
+    els.calNext.addEventListener('click', () => shiftCalendar(1));
+    els.calToday.addEventListener('click', () => {
+      const parts = parseIso(anchorDate);
+      calendar.year = parts.year;
+      calendar.month = parts.month;
+      calendar.selected = anchorDate;
+      renderCalendar();
+    });
+
+    els.equipmentSearch.addEventListener('input', () => renderEquipment());
+    els.equipmentFilter.addEventListener('change', () => renderEquipment());
+    els.equipmentStatus.addEventListener('change', () => renderEquipment());
+    for (const sortButton of els.equipmentTableWrap.querySelectorAll('.sort-button')) {
+      sortButton.addEventListener('click', () => {
+        const key = sortButton.dataset.sort;
+        equipmentSort = { key, dir: equipmentSort.key === key && equipmentSort.dir === 'asc' ? 'desc' : 'asc' };
+        renderEquipment();
+      });
+    }
+
+    els.reservationSearch.addEventListener('input', () => renderReservations());
+    els.reservationFilter.addEventListener('change', () => renderReservations());
+    for (const sortButton of els.reservationsTableWrap.querySelectorAll('.sort-button')) {
+      sortButton.addEventListener('click', () => {
+        const key = sortButton.dataset.sort;
+        reservationSort = { key, dir: reservationSort.key === key && reservationSort.dir === 'asc' ? 'desc' : 'asc' };
+        renderReservations();
+      });
+    }
+    els.reservationDetailClose.addEventListener('click', () => {
+      selectedReservationId = null;
+      els.reservationDetail.hidden = true;
+      renderReservations();
+    });
+
+    els.proposalFilter.addEventListener('change', () => renderOperations());
+
+    els.chatForm.addEventListener('submit', submitChat);
+
+    els.newReservation.addEventListener('click', openPanel);
+    els.panelClose.addEventListener('click', closePanel);
+    els.panelCancel.addEventListener('click', closePanel);
+    els.panelBackdrop.addEventListener('click', closePanel);
+    els.panelForm.addEventListener('submit', submitPanel);
+    els.panel.addEventListener('keydown', trapPanelFocus);
+    els.panelCustomerSearch.addEventListener('input', () => {
+      if (panel.customerId && els.panelCustomerSearch.value !== panel.customerName) {
+        panel.customerId = null;
+        panel.customerName = null;
+        els.panelCustomerSelected.hidden = true;
+        updatePanelAvailability();
+      }
+      renderPanelCustomerResults(els.panelCustomerSearch.value.trim());
+    });
+    els.panelItemSearch.addEventListener('input', () => renderPanelItemResults(els.panelItemSearch.value.trim()));
+    els.panelStart.addEventListener('input', () => {
+      updatePanelAvailability();
+      if (els.panelItemSearch.value.trim()) renderPanelItemResults(els.panelItemSearch.value.trim());
+    });
+    els.panelEnd.addEventListener('input', () => {
+      updatePanelAvailability();
+      if (els.panelItemSearch.value.trim()) renderPanelItemResults(els.panelItemSearch.value.trim());
+    });
+
+    els.toastClose.addEventListener('click', hideToast);
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (!els.panel.hidden) {
+        event.preventDefault();
+        closePanel();
+      } else if (document.body.classList.contains('nav-open')) {
+        closeMenu();
+        els.menuToggle.focus();
+      } else if (!els.toast.hidden) {
+        hideToast();
+      }
+    });
+
+    if (typeof window.matchMedia === 'function') {
+      const desktop = window.matchMedia('(min-width: 1024px)');
+      const onChange = () => {
+        if (desktop.matches) closeMenu();
+      };
+      if (typeof desktop.addEventListener === 'function') desktop.addEventListener('change', onChange);
+    }
   }
 
-  populateFilters();
-  updateLlmLabels();
-  renderSummary();
-  renderSolveState();
-  hideResults();
-  appendChatMessage('assistant', {
-    status: 'ok',
-    text: 'Rule-based assistant with 0 LLM calls. I can cancel a reservation or check equipment availability from the deterministic solver. I restate every request and wait for your "yes" before calling a tool; this chat never applies a plan.',
-    toolCalls: [],
-    actions: [],
-  });
-
-  const initial = window.location.hash.replace('#', '');
-  showTab(TAB_NAMES.includes(initial) ? initial : 'dispatch', { focus: false, updateHash: false });
+  boot();
 })();

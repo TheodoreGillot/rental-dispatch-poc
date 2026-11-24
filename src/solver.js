@@ -1,368 +1,354 @@
 /*
- * Deterministic re-plan solver for a cancelled rental. Pure functions, no DOM,
- * no network, no LLM calls. Given a cancellation and the inventory state it
- * searches the waitlist for feasible re-lets and returns ranked plans, explicit
- * reasons for every rejection, and hand-off items for human decisions.
+ * Deterministic re-plan solver for the studio inventory.
  *
- * Loaded as a classic script so it also works from file://. Node tests read it
- * through module.exports; the browser reads it from globalThis.RentalSolver.
+ * The original constraint search has been adapted to the seed data shape
+ * (equipment lines with quantityOwned, reservations with item quantities).
+ * For a conflict it tries, in order and in a stable order:
+ *   1. move the latest-starting affected reservation to the nearest free dates;
+ *   2. swap its constrained lines for equivalent stock in the same category;
+ *   3. report that no plan exists, so Operations assigns it to a human.
+ *
+ * Pure functions, no DOM, no network, no model calls. Times are measured with
+ * performance.now (or Date.now) only to report solverMs.
  */
 (function () {
   'use strict';
 
-  const { toDay, inputProblem } = typeof module !== 'undefined'
+  const selectors = typeof module !== 'undefined'
+    ? require('./selectors.js')
+    : globalThis.RentalSelectors;
+
+  const { rangesOverlap } = typeof module !== 'undefined'
     ? require('./validation.js')
     : globalThis.RentalValidation;
 
-  const BUFFER_DAYS = 1;
+  const now = typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? () => performance.now()
+    : () => Date.now();
 
-  // Rule check: a question matching a pattern goes to a human with the clause text.
-  const HANDOFF_RULES = [
-    { topic: 'refund', pattern: /\b(refund\w*|deposits?|money[\s-]back|reimburs\w*|repay\w*)\b/i, clauseId: 'CL-4.2' },
-    {
-      topic: 'cancellation fee',
-      pattern: /\b(fees?|charges?|surcharges?|penalt(y|ies)|costs?|pay(s|ing|ment)?|paid|bill(s|ed|ing)?|price)\b/i,
-      clauseId: 'CL-5.1',
-    },
-    { topic: 'contract question', pattern: /\b(contract\w*|clauses?|liab\w*|terms|agreement)\b/i, clauseId: 'CL-9.1' },
-  ];
+  function rawReservation(state, id) {
+    return state.reservations.find((reservation) => reservation.id === id) || null;
+  }
 
-  const MISSING_CLAUSE = { title: 'Not on file', text: 'No clause text on file; check the contract.' };
+  function cloneReservations(state) {
+    return typeof structuredClone === 'function'
+      ? structuredClone(state.reservations)
+      : JSON.parse(JSON.stringify(state.reservations));
+  }
+
+  function moveAction(reservation, target) {
+    return {
+      type: 'move',
+      reservationId: reservation.id,
+      from: { start: reservation.start, end: reservation.end },
+      to: { start: target.start, end: target.end },
+      shift: target.shift,
+    };
+  }
+
+  function swapAction(reservation, row, replacement, quantity = row.quantity) {
+    return {
+      type: 'swap',
+      reservationId: reservation.id,
+      fromStockId: row.stockId,
+      toStockId: replacement.stockId,
+      quantity,
+      dates: { start: reservation.start, end: reservation.end },
+    };
+  }
+
+  function describeMove(action) {
+    return `Move ${action.reservationId} from ${action.from.start} to ${action.from.end} to ${action.to.start} to ${action.to.end}`;
+  }
+
+  function describeSwap(action) {
+    return `Swap ${action.quantity} × ${action.fromStockId} for ${action.toStockId} on ${action.reservationId}`;
+  }
+
+  function describeAction(action) {
+    return action.type === 'move' ? describeMove(action) : describeSwap(action);
+  }
+
+  function actionKey(action) {
+    if (action.type === 'move') {
+      return `move|${action.reservationId}|${action.to.start}|${action.to.end}`;
+    }
+    return `swap|${action.reservationId}|${action.fromStockId}|${action.toStockId}|${action.quantity}`;
+  }
 
   /**
-   * True when two inclusive date ranges are closer than the buffer allows.
-   * With bufferDays = 1, a booking ending on day 4 blocks day 5 but not day 6.
+   * Apply move/swap actions to a reservations array that the caller owns (a
+   * draft). Throws rather than mutating shared state when an action no longer
+   * fits the reservation.
    */
-  function overlapsWithBuffer(a, b, bufferDays) {
-    return toDay(a.start) <= toDay(b.end) + bufferDays && toDay(b.start) <= toDay(a.end) + bufferDays;
-  }
+  function applyActions(reservations, actions) {
+    for (const action of actions) {
+      const reservation = reservations.find((row) => row.id === action.reservationId);
+      if (!reservation) throw new Error(`Reservation ${action.reservationId} is no longer in the workspace.`);
 
-  function routeHandoffs(question, clauses) {
-    const text = question == null ? '' : String(question).trim();
-    if (!text) return [];
-    const matched = HANDOFF_RULES.filter((rule) => rule.pattern.test(text));
-    // Fail safe: a question no rule recognises still goes to a human, without a clause.
-    if (matched.length === 0) {
-      return [{ topic: 'unclassified question', reason: 'No rule matched. A human reads this question.', clause: null }];
-    }
-    return matched.map((rule) => {
-      const clause = clauses[rule.clauseId] || MISSING_CLAUSE;
-      return {
-        topic: rule.topic,
-        reason: `Matches the ${rule.topic} rule. Money and contract decisions go to a human.`,
-        clause: { id: rule.clauseId, title: clause.title, text: clause.text },
-      };
-    });
-  }
-
-  function none(reason, handoffs) {
-    return { outcome: 'none', reason, plans: [], rejected: [], handoffs };
-  }
-
-  // Released items first (they came back from the cancelled booking), then by id for stable output.
-  function candidatesFor(kind, ctx) {
-    const rank = (res) => (ctx.released.includes(res.id) ? 0 : 1);
-    return ctx.resources
-      .filter((res) => res.kind === kind)
-      .sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
-  }
-
-  /** Returns a human-readable reason why an item cannot serve the request, or null if it can. */
-  function blockingReason(res, request, ctx) {
-    if (ctx.held.includes(res.id)) return `${res.id}: held by staff, not offered`;
-    if (res.mount && res.mount !== request.mount) {
-      return `${res.id}: mount ${res.mount} does not fit request mount ${request.mount}`;
-    }
-    if (res.status === 'maintenance') {
-      if (res.maintenanceUntil == null) return `${res.id}: in maintenance with no return date, not offered`;
-      if (toDay(res.maintenanceUntil) >= toDay(request.start)) {
-        return `${res.id}: in maintenance until ${res.maintenanceUntil}, after pickup on ${request.start}`;
-      }
-    } else if (res.status !== 'ok') {
-      return `${res.id}: unknown status "${String(res.status)}", not offered`;
-    }
-    const clash = ctx.active.find((b) => b.assigned.includes(res.id) && overlapsWithBuffer(request, b, ctx.bufferDays));
-    if (clash) {
-      return `${res.id}: booked as ${clash.id} (${clash.start} to ${clash.end}) inside the ${ctx.bufferDays}-day buffer`;
-    }
-    return null;
-  }
-
-  function describeShortfall({ kind, missing, notes }) {
-    const detail = notes.length ? notes.join('; ') : `no ${kind} item in inventory`;
-    return `Missing ${missing} x ${kind}: ${detail}`;
-  }
-
-  function evaluateRequest(request, position, ctx) {
-    const actions = [];
-    const shortfalls = [];
-    const chosen = new Set();
-    for (const need of request.needs) {
-      const notes = [];
-      let found = 0;
-      for (const res of candidatesFor(need.kind, ctx)) {
-        if (found >= need.count) break;
-        const problem = chosen.has(res.id)
-          ? `${res.id}: already assigned to this request`
-          : blockingReason(res, request, ctx);
-        if (problem) {
-          notes.push(problem);
-          continue;
+      if (action.type === 'move') {
+        if (!action.to || typeof action.to.start !== 'string' || typeof action.to.end !== 'string') {
+          throw new Error(`Cannot move ${reservation.id}: invalid target dates.`);
         }
-        chosen.add(res.id);
-        actions.push({
-          resourceId: res.id,
-          label: res.label,
-          kind: res.kind,
-          source: ctx.released.includes(res.id) ? 'released' : 'free stock',
-        });
-        found += 1;
+        reservation.start = action.to.start;
+        reservation.end = action.to.end;
+        continue;
       }
-      if (found < need.count) shortfalls.push({ kind: need.kind, missing: need.count - found, notes });
+
+      if (action.type === 'swap') {
+        const row = reservation.items.find((item) => item.stockId === action.fromStockId);
+        if (!row) throw new Error(`Reservation ${reservation.id} no longer holds ${action.fromStockId}.`);
+        const quantity = Math.min(action.quantity, row.quantity);
+        if (!Number.isInteger(quantity) || quantity < 1) {
+          throw new Error(`Cannot swap ${action.fromStockId}: invalid quantity.`);
+        }
+        row.quantity -= quantity;
+        if (row.quantity === 0) reservation.items = reservation.items.filter((item) => item !== row);
+        const existing = reservation.items.find((item) => item.stockId === action.toStockId);
+        if (existing) existing.quantity += quantity;
+        else reservation.items.push({ stockId: action.toStockId, quantity });
+        continue;
+      }
+
+      throw new Error(`Unknown plan action "${String(action.type)}".`);
     }
-    return { request, position, actions, shortfalls };
+    return reservations;
   }
 
-  function buildPlan({ request, position, actions, shortfalls }, ctx) {
-    const required = request.needs.reduce((sum, need) => sum + need.count, 0);
-    const usedIds = actions.map((action) => action.resourceId);
-    const unused = ctx.released.filter((id) => !usedIds.includes(id));
-    const missing = shortfalls.map(describeShortfall);
-
-    const checks = [
-      `Availability: items must be free from ${request.start} to ${request.end} after active bookings`,
-      'Status: only items with status ok or maintenance are considered; other statuses are not offered',
-      'Maintenance: an item is blocked when its return date is missing or on or after pickup',
-      `Buffer: ${ctx.bufferDays} day(s) must separate bookings on the same item`,
-      `Kit compatibility: bodies and lenses must match mount ${request.mount}; mount-free items fit any mount`,
-    ];
-    if (ctx.held.length) checks.push(`Staff hold: not offered ${ctx.held.join(', ')}`);
-
-    const open = [
-      ...missing,
-      ...(unused.length ? [`Released but not used: ${unused.join(', ')}`] : []),
-      ...(missing.length ? ['Partial kit: client consent needed before confirming'] : []),
-      ...ctx.handoffs.map((h) => `Human decision pending: ${h.topic}${h.clause ? ` (clause ${h.clause.id})` : ''}`),
-    ];
-
-    return {
-      requestId: request.id,
-      cancelledBookingId: ctx.cancelled.id,
-      releasedIds: ctx.released,
-      bufferDays: ctx.bufferDays,
-      client: request.client,
-      start: request.start,
-      end: request.end,
-      status: missing.length ? 'partial' : 'full',
-      filled: actions.length,
-      required,
-      freeStockCount: actions.filter((action) => action.source === 'free stock').length,
-      waitlistPosition: position,
-      actions,
-      checks,
-      changes: [
-        { client: ctx.cancelled.client, text: `Booking ${ctx.cancelled.id} cancelled; released ${ctx.released.join(', ')}` },
-        { client: request.client, text: `Offered ${usedIds.join(', ') || 'nothing'} for ${request.start} to ${request.end}` },
-        { client: 'Other clients', text: 'No existing booking is moved; only free items are offered' },
-      ],
-      missing,
-      open,
-    };
+  /** The overbooked row for the same stock after a draft is applied, or null. */
+  function remainingConflict(state, reservations, conflict) {
+    const next = { ...state, reservations };
+    return selectors.conflicts(next).find((row) => row.id === conflict.id) || null;
   }
 
-  // Ranking: higher share of the requested items first (a full kit scores 1, so it beats any partial kit);
-  // then fewer free-stock items (more released kit); then earlier waitlist position.
-  function comparePlans(a, b) {
-    return (b.filled / b.required) - (a.filled / a.required)
-      || a.freeStockCount - b.freeStockCount
-      || a.waitlistPosition - b.waitlistPosition;
-  }
-
-  function decide(plans, rejected, waitlistSize, handoffs) {
-    if (plans.length === 0) {
-      const why = waitlistSize === 0
-        ? 'The waitlist is empty.'
-        : rejected.map((r) => `${r.requestId}: ${r.reason}`).join(' | ');
-      return { outcome: 'none', reason: `No feasible plan. ${why}`, plans, rejected, handoffs };
+  function evaluatePlan(state, conflict, actions) {
+    try {
+      const draft = applyActions(cloneReservations(state), actions);
+      const remaining = remainingConflict(state, draft, conflict);
+      return { ok: true, clears: !remaining, overBy: remaining ? remaining.overBy : 0, draft };
+    } catch (error) {
+      return { ok: false, clears: false, overBy: Infinity, error };
     }
-    const [best] = plans;
-    if (best.status === 'full') {
-      return { outcome: 'full', reason: `Full re-plan: ${best.requestId} receives all requested kit.`, plans, rejected, handoffs };
-    }
-    return {
-      outcome: 'partial',
-      reason: `No full re-plan. Next-best: ${best.id} gives ${best.requestId} ${best.filled} of ${best.required} items. ${best.missing.join(' ')}`,
-      plans,
-      rejected,
-      handoffs,
-    };
-  }
-
-  // Items held back by staff are never offered: those of this cancellation and those kept by earlier cancellations.
-  function makeContext(state, cancelled, released, bufferDays, handoffs) {
-    const earlierHolds = state.bookings.filter((b) => b.status === 'cancelled').flatMap((b) => b.held ?? []);
-    return {
-      cancelled,
-      released,
-      held: [...cancelled.assigned.filter((id) => !released.includes(id)), ...earlierHolds],
-      active: state.bookings.filter((b) => b.status !== 'cancelled' && b.id !== cancelled.id),
-      resources: state.resources,
-      bufferDays,
-      handoffs,
-    };
   }
 
   /**
-   * Ranks re-plans for the waitlist after a cancellation.
-   * @param {{resources: object[], bookings: object[], waitlist: object[], clauses: object}} state
-   * @param {{bookingId: string, releasedIds: string[], question?: string}} cancellation
-   *   releasedIds are the booking items the staff released; other items of the booking are held.
-   * @param {number} [bufferDays]
-   * @returns {{outcome: 'full'|'partial'|'none', reason: string, plans: object[], rejected: object[], handoffs: object[]}}
+   * Candidate single actions in a stable order. A move for every affected
+   * reservation, then whole-line swaps, then one-unit swaps so a combination
+   * can trim a line without moving the whole reservation.
    */
-  function solve(state, cancellation, bufferDays = BUFFER_DAYS) {
-    const handoffs = routeHandoffs(cancellation.question, state.clauses);
-    const problem = inputProblem(state);
-    if (problem) return none(problem, handoffs);
-
-    const cancelled = state.bookings.find((b) => b.id === cancellation.bookingId && b.status !== 'cancelled');
-    if (!cancelled) return none(`No active booking ${cancellation.bookingId} to cancel.`, handoffs);
-
-    const released = cancelled.assigned.filter((id) => cancellation.releasedIds.includes(id));
-    if (released.length === 0) return none('No kit or studio released: every item of the booking is held.', handoffs);
-
-    const ctx = makeContext(state, cancelled, released, bufferDays, handoffs);
-    const evaluations = state.waitlist.map((request, position) => evaluateRequest(request, position, ctx));
-    const plans = evaluations
-      .filter((e) => e.actions.length > 0)
-      .map((e) => buildPlan(e, ctx))
-      .sort(comparePlans)
-      .map((plan, index) => ({ id: `P${index + 1}`, ...plan }));
-    const rejected = evaluations
-      .filter((e) => e.actions.length === 0)
-      .map((e) => ({
-        requestId: e.request.id,
-        client: e.request.client,
-        reason: e.shortfalls.map(describeShortfall).join(' '),
-      }));
-
-    return decide(plans, rejected, state.waitlist.length, handoffs);
-  }
-
-  // Max-plus-one over the existing B-numbers, so a new booking id never collides with an existing one.
-  function nextBookingId(bookings) {
-    const numbers = bookings
-      .map((b) => /^B-(\d+)$/.exec(b.id))
+  function candidateActions(state, conflict, maxShift) {
+    const affected = conflict.reservationIds
+      .map((id) => rawReservation(state, id))
       .filter(Boolean)
-      .map((match) => Number(match[1]));
-    return `B-${Math.max(1000, ...numbers) + 1}`;
+      .sort((a, b) => b.start.localeCompare(a.start) || b.id.localeCompare(a.id));
+    const actions = [];
+    const seen = new Set();
+    function add(action) {
+      const key = actionKey(action);
+      if (seen.has(key)) return;
+      seen.add(key);
+      actions.push(action);
+    }
+
+    for (const reservation of affected) {
+      const alternatives = selectors.freeDateAlternatives(state, {
+        start: reservation.start,
+        end: reservation.end,
+        items: reservation.items,
+        excludeReservationId: reservation.id,
+        limit: 1,
+        maxShift,
+      });
+      if (alternatives.length) add(moveAction(reservation, alternatives[0]));
+
+      for (const row of reservation.items) {
+        const replacements = selectors.equivalentItems(
+          state,
+          row.stockId,
+          reservation.start,
+          reservation.end,
+          row.quantity,
+          [reservation.id],
+          1,
+        );
+        if (replacements.length) add(swapAction(reservation, row, replacements[0]));
+        if (row.quantity > 1) {
+          const single = selectors.equivalentItems(
+            state,
+            row.stockId,
+            reservation.start,
+            reservation.end,
+            1,
+            [reservation.id],
+            1,
+          );
+          if (single.length) add(swapAction(reservation, row, single[0], 1));
+        }
+      }
+    }
+    return { affected, actions };
+  }
+
+  function compatible(actions) {
+    const moves = new Set();
+    const swaps = new Set();
+    for (const action of actions) {
+      if (action.type === 'move') {
+        if (moves.has(action.reservationId)) return false;
+        moves.add(action.reservationId);
+      } else {
+        const key = `${action.reservationId}|${action.fromStockId}`;
+        if (swaps.has(key)) return false;
+        swaps.add(key);
+      }
+    }
+    return true;
   }
 
   /**
-   * Returns a new state with the plan applied. The input state is not mutated.
-   * Before anything changes, every action is re-checked against the current state;
-   * if one is now blocked, the function throws and the input state is left as it was.
-   * The cancelled booking is marked cancelled and keeps its held items as `held`,
-   * the request leaves the waitlist, and a new booking holds the planned items.
+   * Search one conflict for an actionable re-plan. Every candidate is applied
+   * to a draft and the conflict is re-checked; an action or combination is only
+   * feasible when the target conflict is actually gone. Combinations are bounded
+   * to three actions, then the best partial reduction is reported, or none.
    */
-  function applyPlan(state, plan) {
-    const original = state.bookings.find((b) => b.id === plan.cancelledBookingId && b.status !== 'cancelled');
-    const request = state.waitlist.find((r) => r.id === plan.requestId);
-    if (!original || !request) throw new Error(`Cannot apply ${plan.id}: booking or request not found`);
+  function solveConflict(state, conflict, options = {}) {
+    const started = now();
+    const maxShift = Number.isInteger(options.maxShift) ? options.maxShift : 60;
+    const { affected, actions } = candidateActions(state, conflict, maxShift);
+    const limit = Math.min(actions.length, 16);
+    let best = null;
 
-    const planned = plan.actions.map((action) => action.resourceId);
-    const repeated = [...new Set(planned.filter((id, index) => planned.indexOf(id) !== index))];
-    if (repeated.length) throw new Error(`Cannot apply ${plan.id}: duplicate item in the plan: ${repeated.join(', ')}`);
+    function record(result, chosen) {
+      if (!result.ok) return false;
+      if (result.clears) return true;
+      const candidate = { actions: chosen, overBy: result.overBy };
+      if (!best
+        || candidate.overBy < best.overBy
+        || (candidate.overBy === best.overBy && candidate.actions.length < best.actions.length)) {
+        best = candidate;
+      }
+      return false;
+    }
 
-    const released = original.assigned.filter((id) => plan.releasedIds.includes(id));
-    const ctx = makeContext(state, original, released, plan.bufferDays, []);
-    const blocked = plan.actions
-      .map((action) => {
-        const res = state.resources.find((r) => r.id === action.resourceId);
-        return res ? blockingReason(res, request, ctx) : `${action.resourceId}: not in inventory`;
+    function resultFor(feasibility, chosen, overBy, reason) {
+      return {
+        feasibility,
+        actions: chosen,
+        actionLabels: chosen.map(describeAction),
+        reason,
+        solverMs: now() - started,
+        reservationId: chosen.length ? chosen[0].reservationId : (affected[0] ? affected[0].id : null),
+        overByRemaining: overBy,
+      };
+    }
+
+    // One action.
+    for (let i = 0; i < limit; i += 1) {
+      const chosen = [actions[i]];
+      if (record(evaluatePlan(state, conflict, chosen), chosen)) {
+        return resultFor('feasible', chosen, 0, `${conflict.stockId} conflict clears with one action: ${describeAction(chosen[0])}.`);
+      }
+    }
+
+    // Two actions.
+    for (let i = 0; i < limit; i += 1) {
+      for (let j = i + 1; j < limit; j += 1) {
+        const chosen = [actions[i], actions[j]];
+        if (!compatible(chosen)) continue;
+        if (record(evaluatePlan(state, conflict, chosen), chosen)) {
+          return resultFor('feasible', chosen, 0, `${conflict.stockId} conflict clears with a two-action plan: ${chosen.map(describeAction).join('; ')}.`);
+        }
+      }
+    }
+
+    // Three actions (the bounded maximum).
+    for (let i = 0; i < limit; i += 1) {
+      for (let j = i + 1; j < limit; j += 1) {
+        for (let k = j + 1; k < limit; k += 1) {
+          const chosen = [actions[i], actions[j], actions[k]];
+          if (!compatible(chosen)) continue;
+          if (record(evaluatePlan(state, conflict, chosen), chosen)) {
+            return resultFor('feasible', chosen, 0, `${conflict.stockId} conflict clears with a three-action plan: ${chosen.map(describeAction).join('; ')}.`);
+          }
+        }
+      }
+    }
+
+    const originalOverBy = conflict.overBy;
+    if (best && best.overBy < originalOverBy) {
+      return resultFor(
+        'partial',
+        best.actions,
+        best.overBy,
+        `Up to three moves or swaps reduce the ${conflict.stockId} overbooking to ${best.overBy} over owned, but cannot clear it. A human dispatcher has to decide.`,
+      );
+    }
+
+    return resultFor(
+      'none',
+      [],
+      originalOverBy,
+      `No free dates or equivalent stock can absorb this conflict within ${maxShift} days. A human dispatcher has to decide.`,
+    );
+  }
+
+  /**
+   * A cancellation frees stock. It only targets a conflict on the same stock id
+   * whose dates overlap the cancelled reservation, and only when restoring that
+   * reservation would actually deepen the conflict (so the freed units reduce
+   * the shortfall). The plan itself comes from solveConflict.
+   */
+  function solveCancellation(state, cancelledReservation, conflictRows, solvedResults = null) {
+    const started = now();
+    const freed = cancelledReservation.items.map((row) => ({
+      stockId: row.stockId,
+      quantity: row.quantity,
+      item: selectors.equipmentFor(state, row.stockId),
+    }));
+    const freedByStock = new Map();
+    for (const row of freed) freedByStock.set(row.stockId, (freedByStock.get(row.stockId) || 0) + row.quantity);
+    const related = (conflictRows || [])
+      .filter((conflict) => {
+        if ((freedByStock.get(conflict.stockId) || 0) < 1) return false;
+        if (!rangesOverlap(cancelledReservation.start, cancelledReservation.end, conflict.from, conflict.to)) return false;
+        const restored = {
+          ...state,
+          reservations: state.reservations.map((row) => (row.id === cancelledReservation.id
+            ? { ...row, status: 'confirmed', start: cancelledReservation.start, end: cancelledReservation.end }
+            : row)),
+        };
+        const before = selectors.conflicts(restored).find((row) => row.id === conflict.id);
+        return Boolean(before && before.overBy > conflict.overBy);
       })
-      .filter(Boolean);
-    if (blocked.length) throw new Error(`Cannot apply ${plan.id}, the kit is no longer free: ${blocked.join('; ')}`);
+      .sort((a, b) => a.id.localeCompare(b.id));
 
-    const next = structuredClone(state);
-    const cancelled = next.bookings.find((b) => b.id === original.id);
-    cancelled.status = 'cancelled';
-    cancelled.held = original.assigned.filter((id) => !released.includes(id));
-    next.waitlist = next.waitlist.filter((r) => r.id !== request.id);
-    next.bookings.push({
-      id: nextBookingId(state.bookings),
-      client: request.client,
-      start: request.start,
-      end: request.end,
-      mount: request.mount,
-      status: plan.status === 'full' ? 'confirmed' : 'awaiting-client-consent',
-      assigned: plan.actions.map((action) => action.resourceId),
-    });
-    return next;
-  }
-
-  /**
-   * Availability for one resource kind over an inclusive range, using the same
-   * status, maintenance, buffer and staff-hold rules as solve(). A mount is
-   * checked only when one is supplied; without it, physical availability is reported.
-   * Read-only: it never changes the state it is given.
-   * @param {object} state
-   * @param {{kind: string, start: string, end: string, mount?: string|null,
-   *   releasedIds?: string[], bookingId?: string, bufferDays?: number}} options
-   * @returns {{ok: true, resourceKind: string, start: string, end: string,
-   *   mount: string|null, bufferDays: number, available: string[],
-   *   unavailable: {id: string, label: string, reason: string}[]} | {ok: false, error: string}}
-   */
-  function availabilityReport(state, options) {
-    const opts = options || {};
-    const kind = typeof opts.kind === 'string' ? opts.kind.trim() : '';
-    if (!kind) return { ok: false, error: 'A resource kind is required.' };
-    if (toDay(opts.start) === null) {
-      return { ok: false, error: `Invalid start date "${String(opts.start)}": expected a real YYYY-MM-DD date.` };
-    }
-    if (toDay(opts.end) === null) {
-      return { ok: false, error: `Invalid end date "${String(opts.end)}": expected a real YYYY-MM-DD date.` };
-    }
-    if (toDay(opts.start) > toDay(opts.end)) {
-      return { ok: false, error: `The range ends on ${opts.end}, before it starts on ${opts.start}.` };
+    if (related.length === 0) {
+      return {
+        feasibility: 'none',
+        actions: [],
+        actionLabels: [],
+        reason: `Cancellation ${cancelledReservation.id} freed ${freed.length} line(s), but no open conflict needs those items on overlapping dates. The stock is back in availability; a dispatcher can re-let it.`,
+        solverMs: now() - started,
+        reservationId: null,
+        conflict: null,
+        freedQuantity: 0,
+      };
     }
 
-    const bufferDays = Number.isInteger(opts.bufferDays) ? opts.bufferDays : BUFFER_DAYS;
-    const mount = typeof opts.mount === 'string' && opts.mount.trim() ? opts.mount.trim().toUpperCase() : null;
-    const releasedIds = Array.isArray(opts.releasedIds) ? opts.releasedIds : [];
-    const cancelled = opts.bookingId
-      ? state.bookings.find((b) => b.id === opts.bookingId && b.status !== 'cancelled')
-      : null;
-    const released = cancelled ? cancelled.assigned.filter((id) => releasedIds.includes(id)) : [];
-    const earlierHolds = state.bookings.filter((b) => b.status === 'cancelled').flatMap((b) => b.held ?? []);
-    const held = [
-      ...(cancelled ? cancelled.assigned.filter((id) => !released.includes(id)) : []),
-      ...earlierHolds,
-    ];
-    const ctx = {
-      released,
-      held,
-      active: state.bookings.filter((b) => b.status !== 'cancelled' && (!cancelled || b.id !== cancelled.id)),
-      resources: state.resources,
-      bufferDays,
-      handoffs: [],
+    const target = related[0];
+    const cached = solvedResults && solvedResults.get(target.id);
+    const result = cached || solveConflict(state, target);
+    const freedQuantity = freedByStock.get(target.stockId) || 0;
+    return {
+      ...result,
+      reason: `${result.reason} Cancellation ${cancelledReservation.id} freed ${freedQuantity} × ${target.stockId} on dates that overlap the conflict.`,
+      conflict: target,
+      freedQuantity,
+      solverMs: cached ? cached.solverMs : now() - started,
     };
-
-    const base = { id: 'availability-check', start: opts.start, end: opts.end, needs: [] };
-    const available = [];
-    const unavailable = [];
-    for (const res of candidatesFor(kind, ctx)) {
-      // With no mount supplied, compare each item against its own mount so the
-      // mount rule cannot reject everything; the other rules still apply.
-      const request = { ...base, mount: mount === null ? res.mount : mount };
-      const reason = blockingReason(res, request, ctx);
-      if (reason) unavailable.push({ id: res.id, label: res.label, reason });
-      else available.push(res.id);
-    }
-    return { ok: true, resourceKind: kind, start: opts.start, end: opts.end, mount, bufferDays, available, unavailable };
   }
 
-  const api = { BUFFER_DAYS, overlapsWithBuffer, routeHandoffs, solve, applyPlan, availabilityReport };
+  const api = { solveConflict, solveCancellation, applyActions };
 
   if (typeof module !== 'undefined') {
     module.exports = api;
