@@ -15,7 +15,8 @@ solver is deterministic code.
 | Path | Purpose |
 | --- | --- |
 | `index.html` | Demo page: scope card, scenario picker, kit selection, ranked plans, approve/reject, hand-off panel, timing |
-| `styles.css` | Layout (phone width first, 16px gutters) |
+| `styles.css` | Layout and visual system (system font stacks, one accent colour, phone width first, no horizontal scroll at 375 px) |
+| `favicon.svg` | Page icon (a separate file: data: URIs are blocked by the CSP) |
 | `src/data.js` | Fictional inventory, studio slots, bookings, waitlist, maintenance status, clauses, scenarios |
 | `src/validation.js` | Input checks: real YYYY-MM-DD dates, ranges that do not end before they start, positive integer counts (no DOM) |
 | `src/solver.js` | Pure re-plan search, rule check for hand-offs, and `applyPlan` (no DOM) |

@@ -4,66 +4,137 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; form-action 'none'">
-  <title>Rental re-plan demo (fictional)</title>
+  <title>Rental re-plan demo (fictional): re-let kit after a cancellation</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header>
-    <h1>Rental re-plan demo</h1>
-    <p class="subtle">Atelier Lumière (fictional) · operations dispatch proof of concept. All data is fictional.</p>
-    <p class="badge">LLM calls: 0</p>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <div>
+        <p class="eyebrow">Atelier Lumière (fictional) · Operations dispatch proof of concept</p>
+        <h1>Rental re-plan demo</h1>
+        <p class="tagline">Re-let a cancelled rental's kit from the waitlist. The solver checks; a person decides.</p>
+      </div>
+      <p class="badge">LLM calls: 0</p>
+    </div>
   </header>
 
-  <main>
-    <section class="card" aria-labelledby="scope-title">
-      <h2 id="scope-title">Scope card</h2>
-      <dl class="scope">
-        <dt>Real</dt>
-        <dd>The constraint check and re-plan search on the mock data (solver, deterministic code).</dd>
-        <dt>Wrapper</dt>
-        <dd>The staff UI: scenario picker, kit selection, approve or reject.</dd>
-        <dt>Faked</dt>
-        <dd>Login, data, client messages (templated), vendor integrations. The AI: none in this PoC.</dd>
-        <dt>Cut</dt>
-        <dd>Billing, dashboards, settings.</dd>
-      </dl>
-    </section>
+  <main class="wrap">
+    <div class="workspace">
+      <div class="steps">
+        <section class="card step" aria-labelledby="step1-title">
+          <h2 id="step1-title"><span class="step-no" aria-hidden="true">1</span> Pick a cancellation</h2>
+          <p class="hint">Each card is a cancellation. Pick one to load its kit and any client question.</p>
+          <ul id="scenarios" class="scenario-list" aria-label="Cancellations"></ul>
+          <div id="scenario-detail" class="detail" hidden>
+            <p id="scenario-summary"></p>
+            <p id="question" class="question"></p>
+            <p id="waitlist-line" class="note"></p>
+          </div>
+        </section>
 
-    <section class="card" aria-labelledby="pick-title">
-      <h2 id="pick-title">1. Pick a cancellation</h2>
-      <label for="scenario">Scenario</label>
-      <select id="scenario"></select>
-      <p id="scenario-summary"></p>
-      <p id="question" class="question"></p>
-      <fieldset>
-        <legend>Kit released by the cancellation (untick to hold back)</legend>
-        <div id="kit-options" class="kit-list"></div>
-      </fieldset>
-      <button type="button" id="solve" class="primary">Solve re-plan</button>
-      <p class="timing">Solver time: <span id="timing">not run yet</span></p>
-    </section>
+        <section class="card step" aria-labelledby="step2-title">
+          <h2 id="step2-title"><span class="step-no" aria-hidden="true">2</span> Choose kit</h2>
+          <p id="kit-placeholder" class="empty">Pick a cancellation in step 1 to see the kit it releases.</p>
+          <div id="kit-panel" hidden>
+            <fieldset>
+              <legend>Kit released by the cancellation (untick to hold back)</legend>
+              <p id="kit-count" class="kit-count" role="status"></p>
+              <ul id="kit-options" class="kit-list"></ul>
+              <p id="kit-note" class="note"></p>
+            </fieldset>
+          </div>
+        </section>
 
-    <section class="card" id="plans-section" aria-labelledby="plans-title" hidden>
-      <h2 id="plans-title">2. Ranked re-plans</h2>
-      <p id="outcome" class="outcome"></p>
-      <div id="plans"></div>
-      <button type="button" id="reject-all" class="secondary" disabled>Reject re-plan</button>
-    </section>
+        <section class="card step" aria-labelledby="step3-title">
+          <h2 id="step3-title"><span class="step-no" aria-hidden="true">3</span> Solve</h2>
+          <p class="hint">Runs the deterministic solver in this page. Nothing is sent anywhere.</p>
+          <button type="button" id="solve" class="primary" disabled aria-describedby="solve-hint">Solve re-plan</button>
+          <p id="solve-hint" class="status-line" role="status">Pick a cancellation in step 1 first.</p>
+        </section>
+      </div>
 
-    <section class="card" id="handoff-section" aria-labelledby="handoff-title" hidden>
-      <h2 id="handoff-title">3. Hand-off to a human</h2>
-      <ul id="handoffs"></ul>
-    </section>
+      <section class="card results" id="results" aria-labelledby="results-title" aria-busy="false">
+        <h2 id="results-title">Result</h2>
+        <p id="results-empty" class="empty" role="status"></p>
 
-    <section class="card" id="result-section" aria-labelledby="result-title" hidden>
-      <h2 id="result-title">4. Decision</h2>
-      <p id="decision" class="outcome"></p>
-      <h3>Inventory view</h3>
-      <div id="inventory" class="table-wrap"></div>
-      <h3>Drafted client message (template, not sent)</h3>
-      <pre id="draft"></pre>
-    </section>
+        <div id="results-body" hidden>
+          <div class="result-head">
+            <p id="verdict" class="verdict"></p>
+            <p id="timing" class="timing"></p>
+          </div>
+          <p id="outcome" class="outcome-text"></p>
+          <p id="human-note" class="note" hidden>Nothing is offered or applied. The decision goes back to a human dispatcher.</p>
+
+          <div id="plans-block">
+            <h3>Re-plan</h3>
+            <div class="table-wrap">
+              <table class="stack">
+                <thead>
+                  <tr>
+                    <th scope="col">Plan</th>
+                    <th scope="col">To</th>
+                    <th scope="col">From booking</th>
+                    <th scope="col">What moved</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Decision</th>
+                  </tr>
+                </thead>
+                <tbody id="plan-rows"></tbody>
+              </table>
+            </div>
+            <div id="plan-details"></div>
+            <div class="button-row">
+              <button type="button" id="reject-all" class="secondary" disabled>Reject re-plan</button>
+            </div>
+          </div>
+
+          <div id="no-plan-block" hidden>
+            <h3>Requests with no plan</h3>
+            <ul id="no-plan" class="plain-list"></ul>
+          </div>
+
+          <h3>Hand-off to a human</h3>
+          <ul id="handoffs" class="plain-list"></ul>
+
+          <div id="decision-block" hidden>
+            <h3>Decision</h3>
+            <p id="decision" class="outcome-text"></p>
+            <h3>Inventory view</h3>
+            <div class="table-wrap">
+              <table class="stack" id="inventory"></table>
+            </div>
+            <h3>Drafted client message (template, not sent)</h3>
+            <pre id="draft"></pre>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <details class="card scope-panel">
+      <summary>What is real in this demo</summary>
+      <div class="scope-body">
+        <p class="note">Each part of the demo, and whether it is working code, interface, stand-in or left out.</p>
+        <dl class="scope">
+          <dt>Real</dt>
+          <dd>The constraint check and re-plan search on the mock data (solver, deterministic code).</dd>
+          <dt>Wrapper</dt>
+          <dd>The staff UI: scenario picker, kit selection, approve or reject.</dd>
+          <dt>Faked</dt>
+          <dd>Login, data, client messages (templated), vendor integrations. The AI: none in this PoC.</dd>
+          <dt>Cut</dt>
+          <dd>Billing, dashboards, settings.</dd>
+        </dl>
+      </div>
+    </details>
   </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <p>All data is fictional. No login, no backend and no network call at runtime.</p>
+    </div>
+  </footer>
 
   <script src="src/data.js"></script>
   <script src="src/validation.js"></script>
