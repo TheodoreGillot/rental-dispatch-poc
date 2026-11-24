@@ -1,102 +1,228 @@
-# Rental re-plan demo (fictional)
+# Atelier Lumière (fictional) dispatch console
 
-A static proof of concept for a university pitch. A rental house's operations
-staff cancel a rental; the app searches the waitlist for a re-let of the freed
-kit and studio slot, staff approve or reject, and questions about money or
-contracts go to a human.
+A static, product-style demo for a fictional rental house. Staff cancel a
+reservation, the deterministic solver searches the waitlist for a re-plan, and a
+dispatcher approves or rejects the result. A rule-based assistant can take a
+cancellation or availability request, restate it, ask for confirmation, and call
+the same solver.
 
-Everything is fictional: the house ("Atelier Lumière (fictional)"), the clients
-("Client A (fictional)" and so on), the kit, the clauses and the dates. There is
-no login, no backend, no network call at runtime, no API key and no LLM. The
-solver is deterministic code.
+Everything is fictional: the house ("Atelier Lumière (fictional)"), the clients,
+the kit, the clauses and the dates. There is no login, backend, network call,
+analytics or LLM. The solver is deterministic code.
 
 ## Files
 
 | Path | Purpose |
 | --- | --- |
-| `index.html` | Demo page: scope card, scenario picker, kit selection, ranked plans, approve/reject, hand-off panel, timing |
-| `styles.css` | Layout and visual system (system font stacks, one accent colour, phone width first, no horizontal scroll at 375 px) |
-| `favicon.svg` | Page icon (a separate file: data: URIs are blocked by the CSP) |
-| `src/data.js` | Fictional inventory, studio slots, bookings, waitlist, maintenance status, clauses, scenarios |
-| `src/validation.js` | Input checks: real YYYY-MM-DD dates, ranges that do not end before they start, positive integer counts (no DOM) |
-| `src/solver.js` | Pure re-plan search, rule check for hand-offs, and `applyPlan` (no DOM) |
-| `src/approval.js` | Pure approve-step helpers: is the approved plan still the fresh result, and the confirmation text |
-| `src/app.js` | UI wiring; renders plans with `textContent` only |
-| `tests/*.test.js` | Node built-in test runner tests: solver, validation, approval, and static checks on the shipped files |
+| `index.html` | App shell (sidebar/top navigation), five tabs, footer and scope card |
+| `styles.css` | Design system, responsive shell, controls, tables, calendar and chat |
+| `favicon.svg` | Page icon (a separate file because the CSP blocks data: URIs) |
+| `src/data.js` | Fictional inventory, bookings, waitlist, overflow request, clauses, four scenarios |
+| `src/validation.js` | Date, range and count checks (unchanged) |
+| `src/solver.js` | Deterministic re-plan search, rule check, `applyPlan`, and the read-only `availabilityReport` helper |
+| `src/approval.js` | Approve-step helpers (unchanged) |
+| `src/summary.js` | Pure Dispatch card numbers: open reservations, capacity, re-plans |
+| `src/tools.js` | Pure assistant tools that validate input and call the solver |
+| `src/assistant.js` | Rule-based intent parsing, confirmation state machine and templated replies |
+| `src/app.js` | UI wiring: tabs, views, Dispatch flow, assistant chat; textContent only |
+| `tests/*.test.js` | Node built-in test runner: solver, validation, approval, tools, assistant, summary, static checks |
 
 ## Run
 
-Open `index.html` in a browser. No server is needed; it works from `file://`.
+Open `index.html` in a browser. It works from `file://` because every script is a
+classic script; all paths are relative, so it also works in a subdirectory.
 
-Or serve the folder statically, for example:
+Or serve the folder statically:
 
 ```sh
 python3 -m http.server 8000
-# then open http://localhost:8000/
+# then open the printed local address
 ```
-
-The page is also safe to host in a subdirectory: all paths are relative.
 
 ## Test
 
-Requires Node 18 or newer (developed on Node 26; no packages to install).
+Requires Node 18 or newer; there are no packages to install.
 
 ```sh
 node --test
 ```
 
-The tests cover the happy path, buffer and maintenance boundaries, no-candidate
-and maintenance failure modes, input validation (dates, ranges, counts, empty
-needs), duplicate-kind needs, booking ids, staff-held kit, ranking, hand-off
-routing, `applyPlan` (including its re-check), the approve guard, and the CSP
-and banned-API checks.
+The suite covers the original solver, validation and approval behaviour plus the
+new tools, assistant state machine, summary rules and static checks on the shipped
+files.
 
-## Deploy (GitHub Pages)
+## Screens
 
-1. Push this folder's contents to the `main` branch of a GitHub repository.
-2. In the repository settings, open Pages, choose "Deploy from a branch",
-   select `main` and the `/ (root)` folder, and save.
-3. The site is served at `https://<user>.github.io/<repo>/`. No build step.
+- **Dispatch** — three summary cards, then the original three-step flow (scenario
+  cards, kit checklist, solve) and the results panel with approve/reject.
+- **Calendar** — a month grid built from active bookings, with previous/next month
+  and a selected-day list. Days with reservations show a count and the first id.
+- **Equipment** — the resource table with id, kind, mount, a status badge
+  (Available, Booked, Maintenance, Held) and the booking that holds it. Filter by
+  kind.
+- **Reservations** — bookings with id, client, dates, items and a status badge.
+  Search and status filters. Assistant hand-off links focus the matching row.
+- **Assistant** — chat with fixed suggestions, confirmation, collapsible solver
+  calls and a hand-off link for no-plan cases.
 
-## How the solver works
+Every data view has an empty state, a one-frame loading state and an error state
+for failed tool calls or invalid input. Table headers are sticky on desktop, rows
+have a hover state, and tables become labelled blocks on phones.
 
-- **Input:** the cancelled booking, the released items (the rest of the booking's items are held by staff), the active bookings, the waitlist, and the clauses.
-- **Input validation:** every booking start and end, request start and end, and maintenance return date must be a real YYYY-MM-DD date; ranges must not end before they start; each need must have a positive integer count; a request needs at least one need. Any failure returns `outcome: 'none'` with a reason that names the field and the value. Nothing is treated as free.
-- **Constraints per candidate item:**
-  - *Kit compatibility:* bodies and lenses must match the request mount; mount-free items (lights, audio, studio slots) fit any mount.
-  - *Status:* only `ok` and `maintenance` items are considered; any other status is unavailable.
-  - *Maintenance:* an item is blocked when its return date is missing or on or after the pickup day.
-  - *Availability with buffer:* the item must have no active booking within 1 day of the requested range (one full day must separate bookings).
-  - *Staff hold:* items not released are never offered, including items held by an earlier cancellation (stored as `held` on that cancelled booking).
-  - *One item per request:* an item is assigned at most once per request, even when two needs name the same kind.
-- **Ranking:** a higher share of the requested items first (a full kit scores 100%, so full beats partial); then fewer free-stock items (more released kit); then earlier waitlist position.
-- **Approve guard:** before applying, the app re-runs the solver with the kit currently ticked and refuses unless the approved plan is identical to the fresh result. Changing a kit tick hides the results until the user solves again.
-- **Apply re-check:** `applyPlan` re-runs the same blocking checks for every action against the current state. If one is now blocked, it throws and the input state is unchanged. The new booking id is max-plus-one over the existing B-numbers.
-- **Held kit:** after an approval, the cancelled booking keeps the items staff held back as `held`, so they are not offered as free stock later. Released items the plan did not use become free stock.
-- **Output:** every plan lists the actions, the constraints checked, what changes for which client, and what is left open. A rejected request carries its reason. If nothing works, the result is `outcome: 'none'` with the reason.
-- **Hand-off rule check:** any non-empty client question goes to a human hand-off. A question matching a rule gets that topic and its clause text. Matching is case-insensitive and by whole word, and covers the inflected forms below:
-  - *Refund topic (clause CL-4.2):* `refund` and any word starting with `refund` (refunds, refunded); `deposit` and `deposits`; `money back` or `money-back`; any word starting with `reimburs`; any word starting with `repay`.
-  - *Cancellation fee topic (clause CL-5.1):* `fee`, `fees`, `charge`, `charges`, `surcharge`, `surcharges`, `penalty`, `penalties`, `cost`, `costs`, `pay`, `pays`, `paying`, `payment`, `paid`, `bill`, `bills`, `billed`, `billing`, `price`.
-  - *Contract question topic (clause CL-9.1):* `contract` and any word starting with `contract`; `clause` and `clauses`; `liable` and any word starting with `liab` (liability, liabilities); `terms`; `agreement`.
+## Summary card rules
 
-  A question matching none of these gets a general "unclassified question" hand-off with no clause. The solver never decides money or contract questions.
+- **Open reservations:** bookings whose status is not `cancelled`.
+- **Equipment at capacity:** a resource counts when its status is `maintenance`,
+  or when it is assigned to an open booking whose inclusive date range contains
+  the demo reference date, `2026-12-02` (the first pickup in the demo data). The
+  rule lives in `src/summary.js` and does not depend on the viewer's clock.
+- **Re-plans this session:** starts at 0 and increments for each user-initiated
+  solve: the Dispatch **Solve re-plan** button and each assistant `solve_replan`
+  call. It is session-only and resets on reload.
+
+## Assistant
+
+The assistant is rule-based: fixed regular expressions, a small confirmation
+state machine and templates filled from tool output. It makes **0 LLM calls**.
+`src/assistant.js` exports `LLM_CALLS = 0`; `src/app.js` writes that value into
+the visible badges. No network API is present in the project.
+
+### Intents
+
+| Intent | Examples | Behaviour |
+| --- | --- | --- |
+| Cancel a reservation | "Cancel B-1001", "drop reservation B-1002", "cancel Client A" | Finds the reservation, restates what would be released and the re-plan step, then waits for "yes" |
+| Availability / reschedule enquiry | "Is a camera available 2026-12-05 to 2026-12-07?", "reschedule B-1002 to 2026-12-14" | Parses kind, dates and optional mount, restates the check, then waits for "yes". It never moves a booking |
+| General question | "What is the refund policy?", "hello" | Routes money/contract topics through the existing rule check to a human with the clause; otherwise explains the two supported actions |
+
+No tool runs before an explicit confirmation. "No" stops the pending action.
+A new request replaces a pending one without calling a tool. An unknown booking
+id produces an error reply, not an exception.
+
+### Tool interface
+
+`src/tools.js` exports `createTools(getState)`, which returns these functions.
+`getState` may be a state object or a function returning the current state.
+
+```js
+cancel_reservation(bookingId)
+// -> { ok: true, bookingId, client, start, end, status,
+//      releasedIds, released: [{ id, kind, label }], message }
+// -> { ok: false, error }
+
+solve_replan(bookingId, releasedIds)
+// -> { ok: true, feasible, outcome, reason, moves, missing, handoffs,
+//      solverMs, plan }
+// -> { ok: false, error }
+// moves is the best plan's actions, with planId, requestId, client, dates,
+// resourceId, label, kind and source. moves is [] whenever feasible is false.
+
+check_availability(resourceKind, start, end, mount = null)
+// -> { ok: true, resourceKind, start, end, mount, bufferDays,
+//      available: [ids], unavailable: [{ id, label, reason }], message }
+// -> { ok: false, error }
+```
+
+`cancel_reservation` only validates; it does not mutate state. `solve_replan`
+searches the waitlist requests whose dates overlap the cancelled booking, so the
+answer matches the scenario the dispatcher is working. `check_availability`
+reuses the solver's status, maintenance, buffer, mount and staff-hold rules. A
+mount is checked only when supplied.
+
+Every assistant reply that calls a tool renders a collapsed **Solver call**
+`<details>` block containing the tool name, inputs and the structured output as
+JSON inside a `<pre>` written with `textContent`.
+
+### No feasible plan
+
+When `solve_replan` returns `feasible: false`, the assistant says so, prints the
+solver's reason, never lists a move, and adds a visible link to the reservation
+in the Reservations tab. The hand-off sentence is:
+
+> No feasible re-plan, so this goes to a human dispatcher. Open the reservation in the Reservations tab.
+
+## Scenarios and demo scripts
+
+The three original scenarios are unchanged:
+
+1. **Happy path:** full 6/6 re-plan.
+2. **Jury kit mix:** untick `LENS-Z-85`; full 4/4 using `LENS-Z-24` from free stock.
+3. **Edge case:** partial 2/3 with the `CAM-Z-BK` maintenance reason and the
+   refund hand-off to clause CL-4.2.
+
+The fourth scenario is new:
+
+4. **No plan hand-off:** Client I (`B-1000`) cancels an EF-mount body
+   (`CAM-EF-01`). Client J (`W-2004`) needs a Z-mount camera for 2026-12-16 to
+   2026-12-17. All three Z bodies are booked inside the 1-day buffer
+   (`B-1004`, `B-1005`, `B-1003`), `CAM-Z-BK` is in maintenance until
+   2026-12-20, and the released body has the wrong mount. The solver genuinely
+   returns `outcome: "none"`; nothing is forced. `W-2004` lives in
+   `overflowWaitlist` so the three original scenarios and their regression tests
+   keep the same request set. The assistant searches both waitlist arrays.
+
+Suggested demo paths:
+
+- **(a) Normal reservation:** open **Reservations**, search `B-1001`, read the
+  client, dates, items and Confirmed badge.
+- **(b) Cancellation that re-plans:** in **Dispatch**, pick scenario 1 and solve,
+  or ask the assistant to "Cancel B-1001" and confirm. The solver returns a full
+  plan; nothing is applied until a dispatcher approves.
+- **(c) Cancellation that cannot be re-planned:** in **Dispatch**, pick scenario 4
+  and solve, or ask the assistant to "Cancel B-1000" and confirm. The result is
+  `none`; the assistant links to the reservation for a human hand-off.
 
 ## Scope card
 
-- **Real:** the constraint check and re-plan search on the mock data.
-- **Wrapper:** the staff UI.
-- **Faked:** login, data, client messages (templated), vendor integrations. The AI: none in this PoC.
-- **Cut:** billing, dashboards, settings.
+The footer button **About this demo** expands the scope card. The exact text is:
+
+> Real: constraint check and re-plan search (deterministic code). Assistant: rule-based intent parsing and templated replies; 0 LLM calls. Faked: login, data, client messages, vendor integrations. Cut: billing, dashboards (except the summary cards on Dispatch), settings.
+
+The cut list matches the build: there is no billing, no settings screen, and no
+dashboard beyond the three Dispatch summary cards.
+
+## Solver compatibility
+
+- `src/solver.js` `solve` and `applyPlan` output and behaviour are unchanged.
+- One named export was added: `availabilityReport(state, options)`. It reuses the
+  same `blockingReason`, `candidatesFor` and date rules as `solve()` and is
+  read-only. `src/tools.js` `check_availability` is its only caller.
+- `src/validation.js` and `src/approval.js` are unchanged.
+
+## Typography and layout
+
+- One system sans stack; a system mono stack is used only for ids and JSON.
+- Documented scale in `styles.css`: 12, 14, 16, 20, 28, 40 px.
+- One accent colour (`#1d4ed8`); all other colours are neutrals.
+- Sidebar at 1024 px and wider; below that the sidebar becomes an off-canvas menu
+  toggled by the top-bar button. The Dispatch workspace is two columns from
+  1152 px. Tables stack below 768 px so the page does not scroll sideways at
+  375 px.
+- All controls are styled: buttons, text/search inputs, selects (custom chevron),
+  checkboxes (custom check), tables and badges. Every focusable element gets a
+  visible focus ring.
+
+## Accessibility
+
+- One visible `h1` per view and ordered `h2`/`h3` beneath it.
+- Tab buttons are real buttons with `aria-current="page"` on the active tab and
+  arrow/Home/End focus movement. Switching tabs moves focus to the view heading.
+- Icon-only menu button has an `aria-label`; the inline SVG mark is decorative.
+- Results use an `aria-live` region; tool errors use `role="alert"`.
+- The scope card receives focus when opened, returns focus to the footer button
+  when closed, and closes with Escape.
+- Tables stack into labelled blocks on phones; badges always carry a text label.
 
 ## Known limitations
 
-- Single location, one buffer value (1 day), and a single maintenance rule.
-- Needs of the same kind in one request draw distinct items, but the solver has no preference between them beyond the released-first and id order.
-- Client messages come from a fixed template and are never sent.
-- Approvals are kept in memory for the page session: the next solve starts from the approved inventory. Reloading the page resets the demo.
-- Hand-off topics are keyword rules. They only pick the clause to attach; every question still goes to a human, so a missed keyword cannot hide a question.
-- A request that fails input validation fails the whole solve, so one bad request blocks the others until it is fixed.
-- Scripts are classic (non-module) scripts so `file://` works; each file is wrapped in an IIFE. The browser gets one namespace per file (`RentalData`, `RentalSolver`). ES modules were avoided because browsers block module scripts from `file://`.
-- Requires a modern browser with `structuredClone` (Chrome 98+, Firefox 94+, Safari 15.4+).
-- Not tested in a real browser in this environment; the page was checked by static review and by running the solver and helpers in Node.
-- The Content-Security-Policy is `default-src 'self'; base-uri 'none'; form-action 'none'`; there are no inline scripts or styles. Behaviour of `'self'` for `file://` pages depends on the browser and should be checked when the demo is first opened.
+- The assistant's cancel and re-plan tools are read-only. They show what a
+  cancellation would release and what the solver returns; a dispatcher still
+  applies the plan in Dispatch. The chat never edits the live inventory.
+- The assistant searches requests that overlap the cancelled booking's dates,
+  not every waitlist entry. This keeps it aligned with the scenario the
+  dispatcher selected.
+- Availability without a mount is physical availability across all mounts; the
+  reply states the mount only when one was parsed.
+- Approvals live in page memory; reloading resets the demo.
+- Dates in the demo are fixed in December 2026. The calendar and capacity card
+  use data-derived reference dates rather than the wall clock.

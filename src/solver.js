@@ -301,7 +301,68 @@
     return next;
   }
 
-  const api = { BUFFER_DAYS, overlapsWithBuffer, routeHandoffs, solve, applyPlan };
+  /**
+   * Availability for one resource kind over an inclusive range, using the same
+   * status, maintenance, buffer and staff-hold rules as solve(). A mount is
+   * checked only when one is supplied; without it, physical availability is reported.
+   * Read-only: it never changes the state it is given.
+   * @param {object} state
+   * @param {{kind: string, start: string, end: string, mount?: string|null,
+   *   releasedIds?: string[], bookingId?: string, bufferDays?: number}} options
+   * @returns {{ok: true, resourceKind: string, start: string, end: string,
+   *   mount: string|null, bufferDays: number, available: string[],
+   *   unavailable: {id: string, label: string, reason: string}[]} | {ok: false, error: string}}
+   */
+  function availabilityReport(state, options) {
+    const opts = options || {};
+    const kind = typeof opts.kind === 'string' ? opts.kind.trim() : '';
+    if (!kind) return { ok: false, error: 'A resource kind is required.' };
+    if (toDay(opts.start) === null) {
+      return { ok: false, error: `Invalid start date "${String(opts.start)}": expected a real YYYY-MM-DD date.` };
+    }
+    if (toDay(opts.end) === null) {
+      return { ok: false, error: `Invalid end date "${String(opts.end)}": expected a real YYYY-MM-DD date.` };
+    }
+    if (toDay(opts.start) > toDay(opts.end)) {
+      return { ok: false, error: `The range ends on ${opts.end}, before it starts on ${opts.start}.` };
+    }
+
+    const bufferDays = Number.isInteger(opts.bufferDays) ? opts.bufferDays : BUFFER_DAYS;
+    const mount = typeof opts.mount === 'string' && opts.mount.trim() ? opts.mount.trim().toUpperCase() : null;
+    const releasedIds = Array.isArray(opts.releasedIds) ? opts.releasedIds : [];
+    const cancelled = opts.bookingId
+      ? state.bookings.find((b) => b.id === opts.bookingId && b.status !== 'cancelled')
+      : null;
+    const released = cancelled ? cancelled.assigned.filter((id) => releasedIds.includes(id)) : [];
+    const earlierHolds = state.bookings.filter((b) => b.status === 'cancelled').flatMap((b) => b.held ?? []);
+    const held = [
+      ...(cancelled ? cancelled.assigned.filter((id) => !released.includes(id)) : []),
+      ...earlierHolds,
+    ];
+    const ctx = {
+      released,
+      held,
+      active: state.bookings.filter((b) => b.status !== 'cancelled' && (!cancelled || b.id !== cancelled.id)),
+      resources: state.resources,
+      bufferDays,
+      handoffs: [],
+    };
+
+    const base = { id: 'availability-check', start: opts.start, end: opts.end, needs: [] };
+    const available = [];
+    const unavailable = [];
+    for (const res of candidatesFor(kind, ctx)) {
+      // With no mount supplied, compare each item against its own mount so the
+      // mount rule cannot reject everything; the other rules still apply.
+      const request = { ...base, mount: mount === null ? res.mount : mount };
+      const reason = blockingReason(res, request, ctx);
+      if (reason) unavailable.push({ id: res.id, label: res.label, reason });
+      else available.push(res.id);
+    }
+    return { ok: true, resourceKind: kind, start: opts.start, end: opts.end, mount, bufferDays, available, unavailable };
+  }
+
+  const api = { BUFFER_DAYS, overlapsWithBuffer, routeHandoffs, solve, applyPlan, availabilityReport };
 
   if (typeof module !== 'undefined') {
     module.exports = api;

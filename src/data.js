@@ -49,6 +49,9 @@
       ['CAM-Z-03', 'LIGHT-01', 'STUDIO-B']),
     booking('B-1004', 'Client D (fictional)', '2026-12-17', '2026-12-20', 'Z', ['CAM-Z-01']),
     booking('B-1005', 'Client E (fictional)', '2026-12-17', '2026-12-20', 'Z', ['CAM-Z-02']),
+    // Cancelled in scenario 4 (no-plan-handoff). The only released item is an EF body
+    // while the waitlisted request needs a Z body, so no plan exists.
+    booking('B-1000', 'Client I (fictional)', '2026-12-16', '2026-12-17', 'EF', ['CAM-EF-01']),
   ];
 
   function request(id, client, start, end, mount, needs) {
@@ -65,6 +68,13 @@
       [need('camera', 1), need('lens', 1), need('light', 1), need('audio', 1)]),
     request('W-2003', 'Client H (fictional)', '2026-12-18', '2026-12-19', 'Z',
       [need('camera', 2), need('lens', 1)]),
+  ];
+
+  // Requests outside the default priority window. Scenario 4 uses W-2004; the assistant
+  // searches both lists so a real cancellation is checked against everyone waiting.
+  const overflowWaitlist = [
+    request('W-2004', 'Client J (fictional)', '2026-12-16', '2026-12-17', 'Z',
+      [need('camera', 1)]),
   ];
 
   // Fictional clauses. The rule check in solver.js routes questions about these topics to a human.
@@ -105,9 +115,16 @@
       cancellation: { bookingId: 'B-1003', question: 'Can I get a refund of my deposit after cancelling?' },
       waitlistIds: ['W-2003'],
     },
+    {
+      id: 'no-plan-handoff',
+      title: '4. Hand-off: cancellation with no feasible re-plan',
+      summary: 'Client I cancels an EF-mount body. Client J (W-2004) needs a Z-mount camera for 2026-12-16 to 2026-12-17. CAM-Z-01, CAM-Z-02 and CAM-Z-03 are all booked inside the 1-day buffer, CAM-Z-BK is in maintenance until 2026-12-20, and the released CAM-EF-01 does not fit the Z mount. The solver returns no plan, so the case goes to a human dispatcher.',
+      cancellation: { bookingId: 'B-1000', question: '' },
+      waitlistIds: ['W-2004'],
+    },
   ];
 
-  const exported = { house, resources, bookings, waitlist, clauses, scenarios };
+  const exported = { house, resources, bookings, waitlist, overflowWaitlist, clauses, scenarios };
 
   if (typeof module !== 'undefined') {
     module.exports = exported;

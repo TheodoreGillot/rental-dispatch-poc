@@ -4,142 +4,343 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; form-action 'none'">
-  <title>Rental re-plan demo (fictional): re-let kit after a cancellation</title>
+  <title>Atelier Lumière (fictional) dispatch console</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="site-header">
-    <div class="wrap header-inner">
-      <div>
-        <p class="eyebrow">Atelier Lumière (fictional) · Operations dispatch proof of concept</p>
-        <h1>Rental re-plan demo</h1>
-        <p class="tagline">Re-let a cancelled rental's kit from the waitlist. The solver checks; a person decides.</p>
-      </div>
-      <p class="badge">LLM calls: 0</p>
-    </div>
-  </header>
-
-  <main class="wrap">
-    <div class="workspace">
-      <div class="steps">
-        <section class="card step" aria-labelledby="step1-title">
-          <h2 id="step1-title"><span class="step-no" aria-hidden="true">1</span> Pick a cancellation</h2>
-          <p class="hint">Each card is a cancellation. Pick one to load its kit and any client question.</p>
-          <ul id="scenarios" class="scenario-list" aria-label="Cancellations"></ul>
-          <div id="scenario-detail" class="detail" hidden>
-            <p id="scenario-summary"></p>
-            <p id="question" class="question"></p>
-            <p id="waitlist-line" class="note"></p>
-          </div>
-        </section>
-
-        <section class="card step" aria-labelledby="step2-title">
-          <h2 id="step2-title"><span class="step-no" aria-hidden="true">2</span> Choose kit</h2>
-          <p id="kit-placeholder" class="empty">Pick a cancellation in step 1 to see the kit it releases.</p>
-          <div id="kit-panel" hidden>
-            <fieldset>
-              <legend>Kit released by the cancellation (untick to hold back)</legend>
-              <p id="kit-count" class="kit-count" role="status"></p>
-              <ul id="kit-options" class="kit-list"></ul>
-              <p id="kit-note" class="note"></p>
-            </fieldset>
-          </div>
-        </section>
-
-        <section class="card step" aria-labelledby="step3-title">
-          <h2 id="step3-title"><span class="step-no" aria-hidden="true">3</span> Solve</h2>
-          <p class="hint">Runs the deterministic solver in this page. Nothing is sent anywhere.</p>
-          <button type="button" id="solve" class="primary" disabled aria-describedby="solve-hint">Solve re-plan</button>
-          <p id="solve-hint" class="status-line" role="status">Pick a cancellation in step 1 first.</p>
-        </section>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <div class="app-shell" id="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="Primary">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" width="32" height="32" focusable="false" aria-hidden="true">
+            <rect x="2" y="2" width="28" height="28" rx="8" fill="#1d4ed8"></rect>
+            <path d="M9 21V11h3.2l3.8 6.1L19.8 11H23v10h-2.9v-5.7L17 20h-2l-3.1-4.7V21H9z" fill="#ffffff"></path>
+          </svg>
+        </span>
+        <span class="brand-text">
+          <span class="brand-name">Atelier Lumière <span class="brand-fictional">(fictional)</span></span>
+          <span class="brand-product">Dispatch console</span>
+        </span>
       </div>
 
-      <section class="card results" id="results" aria-labelledby="results-title" aria-busy="false">
-        <h2 id="results-title">Result</h2>
-        <p id="results-empty" class="empty" role="status"></p>
+      <nav class="primary-nav" aria-label="Sections">
+        <ul class="nav-list">
+          <li><button type="button" class="nav-tab" data-tab="dispatch" aria-current="page">Dispatch</button></li>
+          <li><button type="button" class="nav-tab" data-tab="calendar">Calendar</button></li>
+          <li><button type="button" class="nav-tab" data-tab="equipment">Equipment</button></li>
+          <li><button type="button" class="nav-tab" data-tab="reservations">Reservations</button></li>
+          <li><button type="button" class="nav-tab" data-tab="assistant">Assistant</button></li>
+        </ul>
+      </nav>
 
-        <div id="results-body" hidden>
-          <div class="result-head">
-            <p id="verdict" class="verdict"></p>
-            <p id="timing" class="timing"></p>
+      <div class="sidebar-foot">
+        <p class="badge js-llm-calls">LLM calls: 0</p>
+        <p class="note">All data is fictional.</p>
+      </div>
+    </aside>
+
+    <div class="nav-backdrop" id="nav-backdrop" hidden></div>
+
+    <div class="app-body">
+      <header class="topbar">
+        <button type="button" class="icon-button" id="menu-toggle" aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation">
+          <svg viewBox="0 0 24 24" width="22" height="22" focusable="false" aria-hidden="true">
+            <path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+          </svg>
+        </button>
+        <span class="topbar-brand">
+          <span class="topbar-name">Atelier Lumière (fictional)</span>
+          <span class="topbar-fiction">All data is fictional</span>
+        </span>
+        <p class="badge js-llm-calls">LLM calls: 0</p>
+      </header>
+
+      <main id="main" tabindex="-1">
+        <section class="view" id="view-dispatch" aria-labelledby="dispatch-title">
+          <header class="view-head">
+            <p class="eyebrow">Operations · demo day 2 December 2026</p>
+            <h1 id="dispatch-title" tabindex="-1">Dispatch</h1>
+            <p class="lede">Re-let a cancelled rental's kit from the waitlist. The deterministic solver checks; a person decides.</p>
+          </header>
+
+          <section class="stats" aria-label="Session summary">
+            <article class="card stat">
+              <p class="stat-label">Open reservations</p>
+              <p class="stat-value" id="stat-open">0</p>
+              <p class="stat-note">Confirmed or awaiting consent</p>
+            </article>
+            <article class="card stat">
+              <p class="stat-label">Equipment at capacity</p>
+              <p class="stat-value" id="stat-capacity">0</p>
+              <p class="stat-note">Maintenance, or booked on 2 Dec 2026</p>
+            </article>
+            <article class="card stat">
+              <p class="stat-label">Re-plans this session</p>
+              <p class="stat-value" id="stat-replans">0</p>
+              <p class="stat-note">Each Dispatch or assistant solve</p>
+            </article>
+          </section>
+
+          <div class="workspace">
+            <div class="steps">
+              <section class="card step" aria-labelledby="step1-title">
+                <h2 id="step1-title"><span class="step-no" aria-hidden="true">1</span> Pick a cancellation</h2>
+                <p class="hint">Each card is a cancellation. Pick one to load its kit and any client question.</p>
+                <ul id="scenarios" class="scenario-list" aria-label="Cancellations"></ul>
+                <div id="scenario-detail" class="detail" hidden>
+                  <p id="scenario-summary"></p>
+                  <p id="question" class="question"></p>
+                  <p id="waitlist-line" class="note"></p>
+                </div>
+              </section>
+
+              <section class="card step" aria-labelledby="step2-title">
+                <h2 id="step2-title"><span class="step-no" aria-hidden="true">2</span> Choose kit</h2>
+                <p id="kit-placeholder" class="empty">Pick a cancellation in step 1 to see the kit it releases.</p>
+                <div id="kit-panel" hidden>
+                  <fieldset>
+                    <legend>Kit released by the cancellation (untick to hold back)</legend>
+                    <p id="kit-count" class="kit-count" role="status"></p>
+                    <ul id="kit-options" class="kit-list"></ul>
+                    <p id="kit-note" class="note"></p>
+                  </fieldset>
+                </div>
+              </section>
+
+              <section class="card step" aria-labelledby="step3-title">
+                <h2 id="step3-title"><span class="step-no" aria-hidden="true">3</span> Solve</h2>
+                <p class="hint">Runs the deterministic solver in this page. Nothing is sent anywhere.</p>
+                <button type="button" id="solve" class="btn btn-primary solve-button" disabled aria-describedby="solve-hint">Solve re-plan</button>
+                <p id="solve-hint" class="status-line" role="status">Pick a cancellation in step 1 first.</p>
+              </section>
+            </div>
+
+            <section class="card results" id="results" aria-labelledby="results-title" aria-busy="false">
+              <div class="result-head">
+                <h2 id="results-title">Result</h2>
+                <p id="timing" class="timing" hidden></p>
+              </div>
+              <p id="results-empty" class="empty results-empty" role="status">Results appear here after you solve. Nothing is applied until you approve a plan.</p>
+              <div id="results-error" class="state state-error" role="alert" hidden></div>
+
+              <div id="results-body" hidden>
+                <div id="results-status" aria-live="polite">
+                  <p id="verdict" class="verdict"></p>
+                  <p id="outcome" class="outcome-text"></p>
+                </div>
+                <p id="human-note" class="note" hidden>Nothing is offered or applied. The decision goes back to a human dispatcher.</p>
+
+                <div id="plans-block">
+                  <h3>Re-plan</h3>
+                  <div class="table-wrap">
+                    <table class="stack">
+                      <thead>
+                        <tr>
+                          <th scope="col">Plan</th>
+                          <th scope="col">To</th>
+                          <th scope="col">From booking</th>
+                          <th scope="col">What moved</th>
+                          <th scope="col">Status</th>
+                          <th scope="col">Decision</th>
+                        </tr>
+                      </thead>
+                      <tbody id="plan-rows"></tbody>
+                    </table>
+                  </div>
+                  <div id="plan-details"></div>
+                  <div class="button-row">
+                    <button type="button" id="reject-all" class="btn btn-secondary" disabled>Reject re-plan</button>
+                  </div>
+                </div>
+
+                <div id="no-plan-block" hidden>
+                  <h3>Requests with no plan</h3>
+                  <ul id="no-plan" class="plain-list"></ul>
+                </div>
+
+                <h3>Hand-off to a human</h3>
+                <ul id="handoffs" class="plain-list"></ul>
+
+                <div id="decision-block" hidden>
+                  <h3>Decision</h3>
+                  <p id="decision" class="outcome-text"></p>
+                  <h3>Inventory view</h3>
+                  <div class="table-wrap">
+                    <table class="stack" id="inventory"></table>
+                  </div>
+                  <h3>Drafted client message (template, not sent)</h3>
+                  <pre id="draft"></pre>
+                </div>
+              </div>
+            </section>
           </div>
-          <p id="outcome" class="outcome-text"></p>
-          <p id="human-note" class="note" hidden>Nothing is offered or applied. The decision goes back to a human dispatcher.</p>
+        </section>
 
-          <div id="plans-block">
-            <h3>Re-plan</h3>
-            <div class="table-wrap">
-              <table class="stack">
+        <section class="view" id="view-calendar" aria-labelledby="calendar-title" hidden>
+          <header class="view-head">
+            <p class="eyebrow">Reservations by day</p>
+            <h1 id="calendar-title" tabindex="-1">Calendar</h1>
+            <p class="lede">A month view built from the active bookings in local data. Select a day to read its reservations.</p>
+          </header>
+
+          <section class="card calendar-card" aria-labelledby="cal-month">
+            <div class="toolbar calendar-toolbar">
+              <button type="button" class="btn btn-secondary" id="cal-prev">Previous month</button>
+              <h2 id="cal-month" class="calendar-month" aria-live="polite">December 2026</h2>
+              <button type="button" class="btn btn-secondary" id="cal-next">Next month</button>
+            </div>
+            <div id="calendar-state" class="state" role="status" hidden></div>
+            <div id="calendar-grid" class="calendar-grid" aria-label="Month grid"></div>
+            <p id="calendar-month-note" class="note"></p>
+          </section>
+
+          <section class="card day-card" aria-labelledby="day-title">
+            <h2 id="day-title">Select a day</h2>
+            <div id="day-state" class="state state-empty" role="status">Select a day to see its reservations.</div>
+            <ul id="day-list" class="day-list"></ul>
+          </section>
+        </section>
+
+        <section class="view" id="view-equipment" aria-labelledby="equipment-title" hidden>
+          <header class="view-head">
+            <p class="eyebrow">Inventory status</p>
+            <h1 id="equipment-title" tabindex="-1">Equipment</h1>
+            <p class="lede">Every resource, its status and the open booking that holds it. Held means staff kept it back after a cancellation.</p>
+          </header>
+
+          <section class="card" aria-labelledby="equipment-table-title">
+            <div class="toolbar toolbar-wrap">
+              <div class="field">
+                <label for="equipment-filter">Filter by kind</label>
+                <span class="select-wrap">
+                  <select id="equipment-filter">
+                    <option value="">All kinds</option>
+                  </select>
+                </span>
+              </div>
+              <p class="note" id="equipment-count" role="status"></p>
+            </div>
+            <h2 id="equipment-table-title" class="sr-only">Equipment table</h2>
+            <div id="equipment-state" class="state" role="status" hidden></div>
+            <div id="equipment-table-wrap" class="table-scroll" hidden>
+              <table class="data-table">
+                <caption class="sr-only">Equipment status for every resource</caption>
                 <thead>
                   <tr>
-                    <th scope="col">Plan</th>
-                    <th scope="col">To</th>
-                    <th scope="col">From booking</th>
-                    <th scope="col">What moved</th>
+                    <th scope="col">Item</th>
+                    <th scope="col">Kind</th>
+                    <th scope="col">Mount</th>
                     <th scope="col">Status</th>
-                    <th scope="col">Decision</th>
+                    <th scope="col">Current booking</th>
                   </tr>
                 </thead>
-                <tbody id="plan-rows"></tbody>
+                <tbody id="equipment-rows"></tbody>
               </table>
             </div>
-            <div id="plan-details"></div>
-            <div class="button-row">
-              <button type="button" id="reject-all" class="secondary" disabled>Reject re-plan</button>
+          </section>
+        </section>
+
+        <section class="view" id="view-reservations" aria-labelledby="reservations-title" hidden>
+          <header class="view-head">
+            <p class="eyebrow">Bookings</p>
+            <h1 id="reservations-title" tabindex="-1">Reservations</h1>
+            <p class="lede">Open and cancelled reservations in local data. Search by id or client, or filter by status.</p>
+          </header>
+
+          <section class="card" aria-labelledby="reservations-table-title">
+            <div class="toolbar toolbar-wrap">
+              <div class="field">
+                <label for="reservation-search">Search</label>
+                <input id="reservation-search" type="search" placeholder="Id or client" autocomplete="off">
+              </div>
+              <div class="field">
+                <label for="reservation-filter">Status</label>
+                <span class="select-wrap">
+                  <select id="reservation-filter">
+                    <option value="">All statuses</option>
+                    <option value="confirmed">Confirmed</option>
+                    <option value="awaiting-client-consent">Awaiting consent</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+                </span>
+              </div>
+              <p class="note" id="reservation-count" role="status"></p>
             </div>
-          </div>
-
-          <div id="no-plan-block" hidden>
-            <h3>Requests with no plan</h3>
-            <ul id="no-plan" class="plain-list"></ul>
-          </div>
-
-          <h3>Hand-off to a human</h3>
-          <ul id="handoffs" class="plain-list"></ul>
-
-          <div id="decision-block" hidden>
-            <h3>Decision</h3>
-            <p id="decision" class="outcome-text"></p>
-            <h3>Inventory view</h3>
-            <div class="table-wrap">
-              <table class="stack" id="inventory"></table>
+            <h2 id="reservations-table-title" class="sr-only">Reservations table</h2>
+            <div id="reservations-state" class="state" role="status" hidden></div>
+            <div id="reservations-table-wrap" class="table-scroll" hidden>
+              <table class="data-table">
+                <caption class="sr-only">Reservations with client, dates, items and status</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Reservation</th>
+                    <th scope="col">Client</th>
+                    <th scope="col">Dates</th>
+                    <th scope="col">Items</th>
+                    <th scope="col">Status</th>
+                  </tr>
+                </thead>
+                <tbody id="reservation-rows"></tbody>
+              </table>
             </div>
-            <h3>Drafted client message (template, not sent)</h3>
-            <pre id="draft"></pre>
-          </div>
+          </section>
+        </section>
+
+        <section class="view" id="view-assistant" aria-labelledby="assistant-title" hidden>
+          <header class="view-head">
+            <p class="eyebrow">Rule-based help</p>
+            <h1 id="assistant-title" tabindex="-1">Assistant</h1>
+            <p class="lede">Ask to cancel a reservation or check availability. The assistant parses fixed patterns, restates the request, asks for confirmation, then calls the deterministic solver.</p>
+          </header>
+
+          <section class="card assistant-card" aria-labelledby="assistant-title">
+            <p class="rule-banner"><strong>Rule-based assistant.</strong> No model, no network, <span class="js-llm-calls">0 LLM calls</span>. Replies are templates filled from the solver output.</p>
+
+            <div class="chat-actions" aria-label="Example requests">
+              <button type="button" class="chip" data-prompt="Cancel B-1001">Cancel B-1001</button>
+              <button type="button" class="chip" data-prompt="Cancel B-1000">Cancel B-1000 (no plan)</button>
+              <button type="button" class="chip" data-prompt="Is a camera available 2026-12-05 to 2026-12-07?">Check camera availability</button>
+              <button type="button" class="chip" data-prompt="Can I get a refund of my deposit?">Ask about a refund</button>
+            </div>
+
+            <ol id="chat-log" class="chat-log" aria-live="polite" aria-label="Conversation" aria-busy="false"></ol>
+            <p id="chat-status" class="status-line" role="status"></p>
+
+            <form id="chat-form" class="chat-form" novalidate>
+              <label for="chat-input">Message</label>
+              <div class="chat-input-row">
+                <input id="chat-input" type="text" name="message" autocomplete="off" placeholder="Ask to cancel a reservation or check availability">
+                <button type="submit" class="btn btn-primary" id="chat-send">Send</button>
+              </div>
+            </form>
+          </section>
+        </section>
+      </main>
+
+      <section class="card scope-card" id="scope-card" aria-labelledby="scope-title" tabindex="-1" hidden>
+        <div class="scope-head">
+          <h2 id="scope-title" tabindex="-1">About this demo</h2>
+          <button type="button" class="btn btn-secondary" id="scope-close">Close</button>
         </div>
+        <p class="scope-sentence" id="scope-sentence">Real: constraint check and re-plan search (deterministic code). Assistant: rule-based intent parsing and templated replies; 0 LLM calls. Faked: login, data, client messages, vendor integrations. Cut: billing, dashboards (except the summary cards on Dispatch), settings.</p>
       </section>
-    </div>
 
-    <details class="card scope-panel">
-      <summary>What is real in this demo</summary>
-      <div class="scope-body">
-        <p class="note">Each part of the demo, and whether it is working code, interface, stand-in or left out.</p>
-        <dl class="scope">
-          <dt>Real</dt>
-          <dd>The constraint check and re-plan search on the mock data (solver, deterministic code).</dd>
-          <dt>Wrapper</dt>
-          <dd>The staff UI: scenario picker, kit selection, approve or reject.</dd>
-          <dt>Faked</dt>
-          <dd>Login, data, client messages (templated), vendor integrations. The AI: none in this PoC.</dd>
-          <dt>Cut</dt>
-          <dd>Billing, dashboards, settings.</dd>
-        </dl>
-      </div>
-    </details>
-  </main>
-
-  <footer class="site-footer">
-    <div class="wrap">
-      <p>All data is fictional. No login, no backend and no network call at runtime.</p>
+      <footer class="site-footer">
+        <p>All data is fictional. Atelier Lumière (fictional) is a made-up rental house.</p>
+        <button type="button" class="link-button" id="scope-link" aria-expanded="false" aria-controls="scope-card">About this demo</button>
+      </footer>
     </div>
-  </footer>
+  </div>
 
   <script src="src/data.js"></script>
   <script src="src/validation.js"></script>
   <script src="src/solver.js"></script>
   <script src="src/approval.js"></script>
+  <script src="src/summary.js"></script>
+  <script src="src/tools.js"></script>
+  <script src="src/assistant.js"></script>
   <script src="src/app.js"></script>
 </body>
 </html>
