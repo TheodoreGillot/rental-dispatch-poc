@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>Rental re-plan demo (fictional)</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>Rental re-plan demo</h1>
+    <p class="subtle">Atelier Lumière (fictional) · operations dispatch proof of concept. All data is fictional.</p>
+    <p class="badge">LLM calls: 0</p>
+  </header>
+
+  <main>
+    <section class="card" aria-labelledby="scope-title">
+      <h2 id="scope-title">Scope card</h2>
+      <dl class="scope">
+        <dt>Real</dt>
+        <dd>The constraint check and re-plan search on the mock data (solver, deterministic code).</dd>
+        <dt>Wrapper</dt>
+        <dd>The staff UI: scenario picker, kit selection, approve or reject.</dd>
+        <dt>Faked</dt>
+        <dd>Login, data, client messages (templated), vendor integrations. The AI: none in this PoC.</dd>
+        <dt>Cut</dt>
+        <dd>Billing, dashboards, settings.</dd>
+      </dl>
+    </section>
+
+    <section class="card" aria-labelledby="pick-title">
+      <h2 id="pick-title">1. Pick a cancellation</h2>
+      <label for="scenario">Scenario</label>
+      <select id="scenario"></select>
+      <p id="scenario-summary"></p>
+      <p id="question" class="question"></p>
+      <fieldset>
+        <legend>Kit released by the cancellation (untick to hold back)</legend>
+        <div id="kit-options" class="kit-list"></div>
+      </fieldset>
+      <button type="button" id="solve" class="primary">Solve re-plan</button>
+      <p class="timing">Solver time: <span id="timing">not run yet</span></p>
+    </section>
+
+    <section class="card" id="plans-section" aria-labelledby="plans-title" hidden>
+      <h2 id="plans-title">2. Ranked re-plans</h2>
+      <p id="outcome" class="outcome"></p>
+      <div id="plans"></div>
+      <button type="button" id="reject-all" class="secondary" disabled>Reject re-plan</button>
+    </section>
+
+    <section class="card" id="handoff-section" aria-labelledby="handoff-title" hidden>
+      <h2 id="handoff-title">3. Hand-off to a human</h2>
+      <ul id="handoffs"></ul>
+    </section>
+
+    <section class="card" id="result-section" aria-labelledby="result-title" hidden>
+      <h2 id="result-title">4. Decision</h2>
+      <p id="decision" class="outcome"></p>
+      <h3>Inventory view</h3>
+      <div id="inventory" class="table-wrap"></div>
+      <h3>Drafted client message (template, not sent)</h3>
+      <pre id="draft"></pre>
+    </section>
+  </main>
+
+  <script src="src/data.js"></script>
+  <script src="src/validation.js"></script>
+  <script src="src/solver.js"></script>
+  <script src="src/approval.js"></script>
+  <script src="src/app.js"></script>
+</body>
+</html>
